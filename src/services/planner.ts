@@ -5,7 +5,7 @@
 import { chatCompletion, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
 import { safeArtifactPath } from "./paths.js";
-import { log } from "./logging.js";
+import { log, logModelSwaps } from "./logging.js";
 
 export const MIN_TASKS = 2;
 export const MAX_TASKS = 4;
@@ -88,14 +88,16 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
 
   for (const [i, target] of targets.entries()) {
     try {
-      const reply = await chatCompletion(target, messages, { jsonMode: true, temperature: 0.1 });
-      const plan = parsePlan(reply);
+      const result = await chatCompletion(target, messages, { jsonMode: true, temperature: 0.1 });
+      logModelSwaps(ws, 0, target.provider, result.skippedModels);
+      const plan = parsePlan(result.content);
       ws.metadata = { ...ws.metadata, ...plan.metadata };
       ws.tasks = plan.tasks;
-      log(ws, 0, "plan", target, `Project decomposed into ${plan.tasks.length} milestones`);
+      log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestones`);
       return;
     } catch (err) {
       lastError = err;
+      if (err instanceof ProviderError) logModelSwaps(ws, 0, target.provider, err.skippedModels);
       const reason = err instanceof ProviderError ? err.reason : `invalid plan (${(err as Error).message})`;
       const next = targets[i + 1];
       log(

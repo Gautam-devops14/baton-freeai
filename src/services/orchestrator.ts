@@ -29,18 +29,22 @@ export function newWorkspaceId(now = Date.now()): string {
   return `ws_${now}_${randomBytes(8).toString("hex")}`;
 }
 
-export function plannerTargets(keys: OrchestrateRequest["keys"], taskType: TaskType): ProviderTarget[] {
-  const t: ProviderTarget[] = [];
-  if (keys.geminiApiKey) t.push(geminiTarget(keys.geminiApiKey));
-  if (keys.groqApiKey) t.push(groqTarget(keys.groqApiKey, taskType));
-  return t;
-}
-
-export function relayTargets(keys: OrchestrateRequest["keys"], taskType: TaskType): ProviderTarget[] {
-  const t: ProviderTarget[] = [];
-  if (keys.groqApiKey) t.push(groqTarget(keys.groqApiKey, taskType)); // sprint tier
-  if (keys.geminiApiKey) t.push(geminiTarget(keys.geminiApiKey)); // fallback tier
-  return t;
+/**
+ * Build each provider target ONCE per request and share it between planner and
+ * relay, so a model Google reports as retired during planning is skipped
+ * straight away for every artifact instead of costing an extra 404 each time.
+ */
+export function buildTargets(
+  keys: OrchestrateRequest["keys"],
+  taskType: TaskType,
+): { planner: ProviderTarget[]; relay: ProviderTarget[] } {
+  const gemini = keys.geminiApiKey ? geminiTarget(keys.geminiApiKey) : undefined;
+  const groq = keys.groqApiKey ? groqTarget(keys.groqApiKey, taskType) : undefined;
+  const present = (t: (ProviderTarget | undefined)[]) => t.filter((x): x is ProviderTarget => Boolean(x));
+  return {
+    planner: present([gemini, groq]), // Gemini is the architect, Groq the safety net
+    relay: present([groq, gemini]), // Groq is the sprint tier, Gemini the fallback
+  };
 }
 
 export async function orchestrate(
@@ -68,11 +72,13 @@ export async function orchestrate(
     executionLogs: [],
   };
 
+  const targets = buildTargets(keys, taskType);
+
   // Stage 2 — planning (Gemini as architect, Groq as safety net).
-  await planWorkspace(ws, plannerTargets(keys, taskType));
+  await planWorkspace(ws, targets.planner);
 
   // Stage 3 — relay execution with failover.
-  const allDone = await runRelay(ws, { targets: relayTargets(keys, taskType) });
+  const allDone = await runRelay(ws, { targets: targets.relay });
 
   const completed = ws.tasks.filter((t) => t.status === "completed");
   const status: OrchestrateResponse["status"] = allDone ? "success" : completed.length > 0 ? "partial" : "failed";

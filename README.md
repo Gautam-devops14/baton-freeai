@@ -1,6 +1,6 @@
 # Baton
 
-A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project with Gemini 2.5 Flash, builds each artifact on Groq, and when Groq returns a 429 or times out it hands the work to Gemini. The task keeps going without restarting, because all context lives in a shared workspace rather than in any one model's chat history.
+A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project with Gemini 3.8 Flash, builds each artifact on Groq, and when Groq returns a 429 or times out it hands the work to Gemini. The task keeps going without restarting, because all context lives in a shared workspace rather than in any one model's chat history.
 
 ## Quick start
 
@@ -52,6 +52,7 @@ Implementation choices that go beyond the spec:
 * **Any provider error fails over** (auth, 4xx, malformed reply), not only 429 and timeouts. The log message records the actual reason.
 * **Unguessable workspace IDs** (`ws_<ts>_<random>`). The ID is the download token, so a bare timestamp would let anyone fetch another user's artifacts.
 * **Timeout covers the response body**, not just the headers. A provider that stalls mid-response still triggers failover after 30s.
+* **Gemini model fallback.** Google retires model IDs for new users without notice. Gemini is configured with a model list (`gemini-3.8-flash`, then `gemini-3.5-flash-lite`; override with `GEMINI_MODELS`). On HTTP 404 or a "no longer available" error, the next model is tried first, and only when every model is gone does Baton fail over to Groq. A retired model is remembered for the rest of the request, so it costs one extra call, not one per file. Each swap appears in the relay log.
 * **Keys are never logged or persisted.** The stored workspace holds no credentials.
 
 ## Storage

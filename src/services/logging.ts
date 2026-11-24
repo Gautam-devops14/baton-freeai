@@ -1,3 +1,4 @@
+import type { SkippedModel } from "../providers/client.js";
 import type { BatonWorkspace, LogEvent, ProviderTarget } from "../types.js";
 
 export function log(
@@ -15,4 +16,17 @@ export function log(
     message,
     timestamp: new Date().toISOString(),
   });
+}
+
+/** Log each retired/not-found model a provider stepped past before it answered or gave up. */
+export function logModelSwaps(ws: BatonWorkspace, step: number, provider: string, skipped: SkippedModel[]): void {
+  for (const s of skipped) {
+    log(
+      ws,
+      step,
+      "failover",
+      { provider, model: s.model },
+      s.next ? `${s.reason}; retrying with ${s.next}` : `${s.reason}; no more ${provider} models to try`,
+    );
+  }
 }

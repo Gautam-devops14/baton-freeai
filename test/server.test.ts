@@ -136,3 +136,52 @@ test("GET / serves the web UI", async () => {
   assert.match(String(res.headers["content-type"]), /text\/html/);
   assert.match(res.body, /<title>Baton<\/title>/);
 });
+
+test("defaults: Gemini prefers gemini-3.8-flash, then gemini-3.5-flash-lite", async () => {
+  const { geminiTarget } = await import("../src/providers/gemini.js");
+  const t = geminiTarget("k");
+  assert.equal(t.model, "gemini-3.8-flash");
+  assert.deepEqual(t.fallbackModels, ["gemini-3.5-flash-lite"]);
+});
+
+test("retired Gemini model: planner swaps to the lite model, relay skips the dead one afterwards", async () => {
+  const RETIRED = new Response('[{"error":{"code":404,"message":"This model is no longer available to new users."}}]', { status: 404 });
+  installFetch(({ url, model, body }) => {
+    if (!isGemini(url)) return rateLimited(); // force every task onto Gemini
+    if (model === "gemini-3.8-flash") return RETIRED.clone();
+    return isPlanner(body) ? completion(PLAN) : completion("ok");
+  });
+  const out = (await buildServer().inject({
+    method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: KEYS },
+  })).json();
+
+  assert.equal(out.status, "success");
+  const first = out.executionLogs.slice(0, 2).map((l: any) => [l.event, l.model, l.message]);
+  assert.deepEqual(first, [
+    ["failover", "gemini-3.8-flash", "HTTP 404 model unavailable; retrying with gemini-3.5-flash-lite"],
+    ["plan", "gemini-3.5-flash-lite", "Project decomposed into 3 milestones"],
+  ]);
+  const geminiModelsCalled = calls.filter((c) => isGemini(c.url)).map((c) => c.model);
+  assert.equal(geminiModelsCalled.filter((m) => m === "gemini-3.8-flash").length, 1, "dead model only tried once per run");
+  for (const t of ["src/models/User.js", "src/routes/auth.js"]) {
+    assert.ok(out.executionLogs.some((l: any) => l.event === "execute" && l.model === "gemini-3.5-flash-lite" && l.message.includes(t)));
+  }
+});
+
+test("all Gemini models retired: planning falls over to Groq only after both were tried", async () => {
+  installFetch(({ url, body }) => {
+    if (isGemini(url)) return new Response('{"error":{"message":"no longer available"}}', { status: 404 });
+    return isPlanner(body) ? completion(PLAN) : completion("ok");
+  });
+  const out = (await buildServer().inject({
+    method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: KEYS },
+  })).json();
+  assert.equal(out.status, "success");
+  assert.deepEqual(out.executionLogs.slice(0, 4).map((l: any) => `${l.event}:${l.provider}:${l.model}`), [
+    "failover:google:gemini-3.8-flash",
+    "failover:google:gemini-3.5-flash-lite",
+    "failover:google:gemini-3.8-flash",
+    "plan:groq:qwen-2.5-coder-32b",
+  ]);
+  assert.match(out.executionLogs[2].message, /HTTP 404 model unavailable; passing planning to groq/);
+});

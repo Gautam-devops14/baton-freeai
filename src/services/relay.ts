@@ -4,7 +4,7 @@
 
 import { chatCompletion, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
-import { log } from "./logging.js";
+import { log, logModelSwaps } from "./logging.js";
 import { extractArtifactBody } from "./sanitize.js";
 
 const DEFAULT_COOLDOWN_MS = 60_000;
@@ -76,16 +76,18 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
 
     for (const [i, target] of candidates.entries()) {
       try {
-        const reply = await chatCompletion(target, messages);
-        ws.artifacts[task.targetArtifact] = extractArtifactBody(reply, task.targetArtifact);
+        const result = await chatCompletion(target, messages);
+        logModelSwaps(ws, task.id, target.provider, result.skippedModels);
+        ws.artifacts[task.targetArtifact] = extractArtifactBody(result.content, task.targetArtifact);
         task.status = "completed";
         task.assignedProvider = target.provider;
-        task.assignedModel = target.model;
-        log(ws, task.id, "execute", target, `Generated ${task.targetArtifact} successfully`);
+        task.assignedModel = result.model;
+        log(ws, task.id, "execute", { ...target, model: result.model }, `Generated ${task.targetArtifact} successfully`);
         break;
       } catch (err) {
         const pe =
           err instanceof ProviderError ? err : new ProviderError((err as Error).message ?? String(err), "network");
+        logModelSwaps(ws, task.id, target.provider, pe.skippedModels);
         if (pe.kind === "rate_limit" || pe.kind === "server") {
           cooldowns.set(keyOf(target), now() + (pe.retryAfterMs ?? DEFAULT_COOLDOWN_MS));
         }

@@ -82,7 +82,12 @@ export interface ChatMessage {
 /** A fully-resolved endpoint the relay can dispatch to. */
 export interface ProviderTarget {
   provider: string; // e.g. "groq", "google"
+  /** Preferred model. */
   model: string;
+  /** Tried in order if the provider reports `model` as gone (404 / "no longer available"). */
+  fallbackModels?: string[];
+  /** Filled in at runtime: models this provider has rejected as unavailable during the current run. */
+  unavailableModels?: Set<string>;
   baseUrl: string;
   apiKey: string;
 }
