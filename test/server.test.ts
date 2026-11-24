@@ -108,7 +108,7 @@ test("reports partial status when every provider fails a task", async () => {
   installFetch(({ url, body }) => {
     if (isGemini(url) && isPlanner(body)) return completion(PLAN);
     n++;
-    return n <= 1 ? completion("ok") : new Response("boom", { status: 500 });
+    return n <= 1 ? completion('{"name":"auth"}') : new Response("boom", { status: 500 });
   });
   const out = (await buildServer().inject({
     method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: KEYS },

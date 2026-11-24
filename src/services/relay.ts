@@ -5,8 +5,8 @@
 import { chatCompletion, cooldownSteps, isTransient, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
 import { busyUntilFor, isAccountSkipped, splitBusy } from "../providers/memory.js";
-import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
-import { extractArtifactBody } from "./sanitize.js";
+import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, markWasted, traceFor } from "./logging.js";
+import { checkArtifact, extractArtifactBody } from "./sanitize.js";
 import { outlineFile } from "./outline.js";
 import { applyEdits } from "./edits.js";
 import { directDependencies } from "./deps.js";
@@ -189,6 +189,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
     if (task.status === "completed") continue;
     task.status = "in_progress";
     const editMode = useEditMode(ws, task);
+    const original = ws.artifacts[task.targetArtifact]; // restored before any retry
     const { messages, sections } = buildTaskPrompt(ws, task, editMode ? "edit" : "full");
     recordContext(
       ws,
@@ -254,16 +255,41 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
           ws.artifacts[task.targetArtifact] = extractArtifactBody(result.content, task.targetArtifact);
           attachBreakdown(ws, task.id, result.model, buildCallBreakdown(result.usage, sections, ws.artifacts[task.targetArtifact].length, result.content.length));
         }
+        // File check: a broken reply (invalid JSON, cut-off HTML, leftover fences, chatter, unclosed braces)
+        // gets one more try with the problem spelled out. A second failure is kept with a warning.
+        const problem = checkArtifact(task.targetArtifact, ws.artifacts[task.targetArtifact]);
+        let servedBy = result.model;
+        if (problem) {
+          log(ws, task.id, "failover", { ...target, model: result.model }, `file check failed for ${task.targetArtifact} (${problem}); asking again`);
+          markWasted(ws, task.id, result.model);
+          if (original === undefined) delete ws.artifacts[task.targetArtifact];
+          else ws.artifacts[task.targetArtifact] = original;
+          const full = buildTaskPrompt(ws, task, "full");
+          const fixMessages = [
+            full.messages[0],
+            {
+              role: "user" as const,
+              content: `${full.messages[1].content}\n\n## Note\nA previous reply for this file had a problem: ${problem}. Output ONLY the complete file in a single fenced code block.`,
+            },
+          ];
+          const retry = await chatCompletion(target, fixMessages, { ...traceFor(ws, task.id) });
+          ws.artifacts[task.targetArtifact] = extractArtifactBody(retry.content, task.targetArtifact);
+          attachBreakdown(ws, task.id, retry.model, buildCallBreakdown(retry.usage, full.sections, ws.artifacts[task.targetArtifact].length, retry.content.length));
+          result.usage = retry.usage;
+          servedBy = retry.model;
+          const still = checkArtifact(task.targetArtifact, ws.artifacts[task.targetArtifact]);
+          note = still ? ` (warning: ${still})` : " (fixed after a file check)";
+        }
         task.status = "completed";
         task.assignedProvider = target.provider;
-        task.assignedModel = result.model;
+        task.assignedModel = servedBy;
         (ws.artifactOrigins ??= {})[task.targetArtifact] = {
           provider: target.provider,
-          model: result.model,
+          model: servedBy,
           runId: ws.workspaceId,
           step: task.id,
         };
-        log(ws, task.id, "execute", { ...target, model: result.model }, `Generated ${task.targetArtifact} successfully${note}`, result.usage);
+        log(ws, task.id, "execute", { ...target, model: servedBy }, `Generated ${task.targetArtifact} successfully${note}`, result.usage);
         return undefined;
       } catch (err) {
         const pe =

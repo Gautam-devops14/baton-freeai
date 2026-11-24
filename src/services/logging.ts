@@ -45,6 +45,12 @@ export function attachBreakdown(ws: BatonWorkspace, step: number, model: string,
   if (call) call.breakdown = { ...zeroBreakdown(), ...breakdown };
 }
 
+/** A successful call whose reply turned out unusable: count all of its tokens as wasted. */
+export function markWasted(ws: BatonWorkspace, step: number, model: string): void {
+  const call = [...(ws.calls ?? [])].reverse().find((c) => c.step === step && c.model === model && c.outcome === "ok");
+  if (call?.tokens) call.breakdown = { ...zeroBreakdown(), wasted: call.tokens.totalTokens };
+}
+
 /** Add up several runs' breakdowns (e.g. today / all time). */
 export function mergeBreakdowns(list: Array<TokenBreakdown | undefined>): TokenBreakdown {
   const total = zeroBreakdown();

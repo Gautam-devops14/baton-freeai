@@ -9,7 +9,7 @@ const isGemini = (url: string) => url.includes("generativelanguage");
 const isNvidia = (url: string) => url.includes("integrate.api.nvidia.com");
 const isPlanner = (body: any) => body.messages?.[0]?.content?.includes("Task Architect");
 const PLAN = JSON.stringify({ tasks: [
-  { title: "Manifest", targetArtifact: "package.json" },
+  { title: "Manifest", targetArtifact: "app.js" },
   { title: "Server", targetArtifact: "server.js" },
 ] });
 
