@@ -54,13 +54,27 @@ Each run shows a **How context was shared** panel. For every step it lists:
 
 This is the core of Baton: context lives in the shared workspace, not in any model's chat memory.
 
+## Test keys
+
+**Settings → Test keys** checks each key with a free request (the provider's model list, or OpenRouter's key-info endpoint), so it spends no tokens. For each provider you get whether the key was accepted (or the exact error) and which of Baton's configured models that account can actually use. API: `POST /api/keys/test` with `{"keys": {...}}`.
+
+## Waiting out short rate limits
+
+If every provider fails a file but one was only briefly rate limited (e.g. Groq's per-minute token cap, which tells you "try again in 7.6s"), Baton waits for that reset and retries, up to `BATON_MAX_RATE_WAIT_MS` (default 20s), instead of giving up on the file. Partial runs also get a **Retry missing files** button.
+
 ## Memory between runs
 
 While the server runs, Baton remembers per provider account (keyed by a hash of the API key, never the key itself):
 
 * **retired models** (404/410/"decommissioned"): skipped for 24h (`BATON_DEAD_MODEL_TTL_MS`)
 * **discovered replacements**: reused for 24h, so discovery doesn't repeat every run
-* **busy providers** (every model answered 503): skipped for 5 minutes (`BATON_BUSY_SKIP_MS`) in later steps and runs, unless no other provider is left. The log says `skipped: every google model was busy…`
+* **skipped providers**, with the reason shown in the log (`skipped: <provider>: <why>`) and in the debug panel. None is skipped if it's the only provider left.
+  * every model busy (503): 5 min (`BATON_BUSY_SKIP_MS`)
+  * key rejected (401/403): 10 min (`BATON_KEY_REJECTED_SKIP_MS`); a different key isn't affected
+  * no credit (e.g. OpenAI `insufficient_quota`): 1 h (`BATON_NO_CREDIT_SKIP_MS`)
+  * free daily cap reached (OpenRouter): 1 h (`BATON_DAILY_LIMIT_SKIP_MS`)
+  * no working models, including discovered ones: 1 h (`BATON_NO_MODELS_SKIP_MS`)
+* Discovery on NVIDIA only considers chat/instruct models. NVIDIA also lists code-completion models such as `starcoder2`, which its chat endpoint answers with 404. Up to 5 candidates are tried.
 
 ## Token counter
 

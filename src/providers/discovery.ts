@@ -8,7 +8,7 @@ import type { ProviderTarget } from "../types.js";
 
 /** Model families that are not general chat/code models. */
 const NOT_CHAT =
-  /embed|whisper|tts|audio|speech|asr|transcri|guard|safety|moderation|rerank|retriev|reward|vision|-vl\b|vlm|image|imagen|veo|dall-e|clip|ocr|parse|deplot|kosmos|neva|fuyu|paligemma|cosmos|robot|search|realtime|translat|live|aqa|computer-use|babbage|davinci|gpt-3\.5-turbo-instruct|tokenizer|pii|detector|nemoretriever|bge|e5-|nv-embed|arctic-embed|playai|orpheus|distil-whisper|sdxl|flux|stable-diffusion/i;
+  /embed|whisper|tts|audio|speech|asr|transcri|guard|safety|moderation|rerank|retriev|reward|vision|-vl\b|vlm|image|imagen|veo|dall-e|clip|ocr|parse|deplot|kosmos|neva|fuyu|paligemma|cosmos|robot|search|realtime|translat|live|aqa|computer-use|babbage|davinci|gpt-3\.5-turbo-instruct|tokenizer|pii|detector|nemoretriever|bge|e5-|nv-embed|arctic-embed|playai|orpheus|distil-whisper|sdxl|flux|stable-diffusion|starcoder|santacoder|codegemma|-base\b|\bbase\b|fim\b|completion/i;
 
 export type ModelHint = string | RegExp;
 

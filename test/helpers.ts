@@ -9,6 +9,8 @@ process.env.BATON_DATA_DIR ??= mkdtempSync(join(tmpdir(), "baton-test-"));
 // (Gemini plans, Groq builds). The default order has its own tests in order.test.ts.
 process.env.BATON_PLANNER_ORDER ??= "google,groq,nvidia,openai";
 process.env.BATON_RELAY_ORDER ??= "groq,google,nvidia,openai";
+// Older tests rate-limit every provider on purpose; don't make them wait for the second chance.
+process.env.BATON_MAX_RATE_WAIT_MS ??= "0";
 
 // Fake OpenAI-compatible provider backend for tests.
 export type Handler = (req: { url: string; model: string; body: any; signal?: AbortSignal }) => Promise<Response> | Response;

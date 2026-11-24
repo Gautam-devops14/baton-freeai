@@ -19,7 +19,17 @@ const busySkipMs = () => Number(process.env.BATON_BUSY_SKIP_MS ?? 5 * 60_000);
 
 const deadModels = new Map<string, number>(); // `${account}|${model}` -> expiresAt
 const discovered = new Map<string, { model: string; expiresAt: number }>(); // account -> model
-const busyUntil = new Map<string, number>(); // account -> until
+/** Providers to skip for a while, with the reason shown in logs. */
+const busyUntil = new Map<string, { until: number; reason: string }>(); // account -> skip info
+
+/** Why a provider is being skipped; each has its own default duration. */
+export const SKIP_REASONS = {
+  busy: "every model was busy (503) in the last few minutes",
+  dailyLimit: "its free daily limit is used up",
+  keyRejected: "its API key was rejected (401/403); check it in Settings",
+  noCredit: "the account has no credit",
+  noModels: "none of its models are available any more",
+} as const;
 
 let now = () => Date.now();
 
@@ -60,19 +70,24 @@ export function rememberDiscoveredModel(t: ProviderTarget, model: string): void 
 }
 
 /** When a provider stays skipped until, or undefined if it isn't marked busy. */
-export function busyUntilFor(t: ProviderTarget): number | undefined {
-  const until = busyUntil.get(account(t));
-  if (until === undefined) return undefined;
-  if (until <= now()) {
+function skipInfo(t: ProviderTarget): { until: number; reason: string } | undefined {
+  const info = busyUntil.get(account(t));
+  if (!info) return undefined;
+  if (info.until <= now()) {
     busyUntil.delete(account(t));
     return undefined;
   }
-  return until;
+  return info;
 }
 
-export function markProviderBusy(t: ProviderTarget, forMs?: number): void {
+export function busyUntilFor(t: ProviderTarget): number | undefined {
+  return skipInfo(t)?.until;
+}
+
+/** Skip this provider (for this API key) for a while. Defaults: 5 min, reason "busy". */
+export function markProviderBusy(t: ProviderTarget, forMs?: number, reason: string = SKIP_REASONS.busy): void {
   const ms = forMs ?? busySkipMs();
-  if (ms > 0) busyUntil.set(account(t), now() + ms);
+  if (ms > 0) busyUntil.set(account(t), { until: now() + ms, reason });
 }
 
 export function clearProviderBusy(t: ProviderTarget): void {
@@ -86,13 +101,13 @@ export function clearProviderBusy(t: ProviderTarget): void {
  */
 export function splitBusy(targets: ProviderTarget[]): {
   ready: ProviderTarget[];
-  skipped: Array<{ target: ProviderTarget; until: number }>;
+  skipped: Array<{ target: ProviderTarget; until: number; reason: string }>;
 } {
-  const skipped: Array<{ target: ProviderTarget; until: number }> = [];
+  const skipped: Array<{ target: ProviderTarget; until: number; reason: string }> = [];
   const ready = targets.filter((t) => {
-    const until = busyUntilFor(t);
-    if (until !== undefined) skipped.push({ target: t, until });
-    return until === undefined;
+    const info = skipInfo(t);
+    if (info) skipped.push({ target: t, until: info.until, reason: info.reason });
+    return !info;
   });
   return ready.length ? { ready, skipped } : { ready: targets, skipped: [] };
 }
@@ -113,9 +128,9 @@ export function snapshotMemory() {
       const a = split(k);
       return { provider: a.provider, host: a.host, keyHash: a.keyHash, model: d.model, until: new Date(d.expiresAt).toISOString() };
     }),
-    busyProviders: [...busyUntil].filter(([, u]) => u > t).map(([k, u]) => {
+    busyProviders: [...busyUntil].filter(([, b]) => b.until > t).map(([k, b]) => {
       const a = split(k);
-      return { provider: a.provider, host: a.host, keyHash: a.keyHash, until: new Date(u).toISOString() };
+      return { provider: a.provider, host: a.host, keyHash: a.keyHash, until: new Date(b.until).toISOString(), reason: b.reason };
     }),
   };
 }

@@ -178,6 +178,9 @@ export const UI_HTML = /* html */ `<!doctype html>
   .check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
   .btn { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 6px 14px; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .keyres { font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+  .keyres.ok { color: var(--ok); } .keyres.bad { color: var(--warn); }
+  .keyres .muted { display: block; }
   #fileDlg { width: min(900px, calc(100vw - 32px)); }
   #fileDlg pre { margin: 0; background: var(--code); border-radius: 8px; padding: 12px; font-size: 12px; overflow: auto; max-height: 65vh; white-space: pre; }
 
@@ -257,7 +260,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     <div id="keyFields"></div>
     <label class="check"><input type="checkbox" id="remember" /> Remember keys in this browser</label>
   </div>
-  <div class="dlg-foot"><button type="button" class="btn primary" id="saveSettings">Save</button></div>
+  <div class="dlg-foot"><button type="button" class="btn" id="testKeys">Test keys</button><button type="button" class="btn primary" id="saveSettings">Save</button></div>
 </dialog>
 
 <dialog id="fileDlg">
@@ -313,7 +316,8 @@ export const UI_HTML = /* html */ `<!doctype html>
     $("keyFields").replaceChildren(...KEY_FIELDS.map(([k, , label, ph, url]) =>
       el("div", { className: "field" },
         el("label", { htmlFor: "key_" + k }, label, el("a", { href: url, target: "_blank", rel: "noopener", textContent: "Get a key" })),
-        el("input", { type: "password", id: "key_" + k, value: keys[k], placeholder: ph, autocomplete: "off" }))));
+        el("input", { type: "password", id: "key_" + k, value: keys[k], placeholder: ph, autocomplete: "off" }),
+        el("div", { className: "keyres", id: "keyres_" + k }))));
     $("remember").checked = remember;
     $("settingsDlg").showModal();
     loadDebug().then((d) => { if (d) $("orderText").textContent = d.providerOrder.relay.map((p) => PROVIDER_LABEL[p] || p).join(" → "); });
@@ -329,6 +333,31 @@ export const UI_HTML = /* html */ `<!doctype html>
   $("openSettings").onclick = openSettings;
   $("keyWarnBtn").onclick = openSettings;
   $("saveSettings").onclick = saveSettings;
+
+  // Test keys: free requests only (model lists / OpenRouter key info), no tokens spent.
+  const PROVIDER_FIELD = { nvidia: "nvidia", groq: "groq", google: "gemini", openrouter: "openrouter", openai: "openai" };
+  $("testKeys").onclick = async () => {
+    const draft = Object.fromEntries(KEY_FIELDS.map(([k, field]) => [field, ($("key_" + k).value || "").trim() || undefined]));
+    for (const [k] of KEY_FIELDS) { const r = $("keyres_" + k); r.className = "keyres muted"; r.textContent = ($("key_" + k).value || "").trim() ? "Testing..." : ""; }
+    $("testKeys").disabled = true;
+    try {
+      const res = await fetch("/api/keys/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keys: draft }) });
+      const data = await res.json();
+      for (const r of data.results || []) {
+        const box = $("keyres_" + PROVIDER_FIELD[r.provider]);
+        if (!box) continue;
+        box.className = "keyres " + (r.ok ? "ok" : "bad");
+        const lines = [(r.ok ? "✓ " : "✗ ") + r.message];
+        if (r.missing && r.missing.length) lines.push("Not available to this key: " + r.missing.join(", "));
+        if (r.account) lines.push("Account: " + (r.account.label || "") + (r.account.freeTier ? " · free tier" : "") + (r.account.limit != null ? " · limit " + r.account.limit : "") + (r.account.usage != null ? " · used " + r.account.usage : ""));
+        box.replaceChildren(el("span", { textContent: lines[0] }), ...lines.slice(1).map((t) => el("span", { className: "muted", textContent: t })));
+      }
+    } catch (e) {
+      for (const [k] of KEY_FIELDS) { const r = $("keyres_" + k); if (r.textContent === "Testing...") { r.className = "keyres bad"; r.textContent = "Could not reach the server"; } }
+    } finally {
+      $("testKeys").disabled = false;
+    }
+  };
   $("closeSettings").onclick = () => $("settingsDlg").close();
 
   // ===================== Data: runs grouped into chats =====================
@@ -520,6 +549,16 @@ export const UI_HTML = /* html */ `<!doctype html>
       dbg.onclick = () => { selectedRunId = rec.id; openDebug("run"); };
       actions.append(dbg);
     }
+    const failedFiles = ((rec.plan && rec.plan.tasks) || []).filter((t) => t.status === "failed").map((t) => t.targetArtifact);
+    if (failedFiles.length && files.length && rec.id) {
+      const retry = el("button", { type: "button", className: "linkbtn", textContent: "Retry missing files" });
+      retry.onclick = () => {
+        $("prompt").value = "Create the missing file" + (failedFiles.length === 1 ? "" : "s") + " " + failedFiles.join(", ") + " so it works with the existing files (it was planned earlier but not built).";
+        autosize();
+        $("composer").requestSubmit();
+      };
+      actions.append(retry);
+    }
     const reuse = el("button", { type: "button", className: "linkbtn muted", textContent: "Edit & resend" });
     reuse.onclick = () => { $("prompt").value = rec.userPrompt || ""; autosize(); $("prompt").focus(); };
     actions.append(reuse);
@@ -608,7 +647,8 @@ export const UI_HTML = /* html */ `<!doctype html>
         } else if (e.type === "log") {
           const l = e.entry;
           if (l.event === "execute") add("✓", "ok", "Wrote " + l.message.replace("Generated ", "").replace(" successfully", ""));
-          else if (l.event === "failover" && l.message.indexOf("skipped:") === 0) add("↷", "dim", (PROVIDER_LABEL[l.provider] || l.provider) + " " + l.message);
+          else if (l.event === "failover" && l.message.indexOf("skipped:") === 0) add("↷", "dim", "Skipped " + (PROVIDER_LABEL[l.provider] || l.provider) + ": " + l.message.split(": ").slice(2).join(": "));
+          else if (l.event === "failover" && l.message.indexOf("waiting ") === 0) add("⏱", "wait", (PROVIDER_LABEL[l.provider] || l.provider) + ": " + l.message);
           else if (l.event === "failover" && l.message.indexOf("passing") >= 0) add("→", "dim", l.message.slice(l.message.indexOf(";") + 2));
         }
       },
@@ -870,7 +910,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       sec("Settings", "", kv([["Provider timeout", d.settings.providerTimeoutMs + " ms"], ["Overload retry wait", d.settings.overloadRetryMs + " ms"], ["Busy provider skip", Math.round(d.settings.busySkipMs / 60000) + " min"], ["Daily-limit skip", Math.round(d.settings.dailyLimitSkipMs / 60000) + " min"], ["Retired model memory", Math.round(d.settings.deadModelTtlMs / 3600000) + " h"], ["Download links", Math.round(d.settings.workspaceTtlSec / 60) + " min, then from history"], ["History limit", d.settings.historyMax + " runs"]])),
       sec("What Baton remembers", forget, remembered
         ? el("div", {},
-            m.busyProviders.length ? table(["Busy provider (skipped)", "Key", "Until"], m.busyProviders.map((b) => [label(b.provider), b.keyHash, until(b.until)])) : null,
+            m.busyProviders.length ? table(["Skipped provider", "Key", "Until", "Why"], m.busyProviders.map((b) => [label(b.provider), b.keyHash, until(b.until), b.reason || "busy"])) : null,
             m.retiredModels.length ? table(["Retired model", "Provider", "Key", "Until"], m.retiredModels.map((r) => [r.model, label(r.provider), r.keyHash, until(r.until)])) : null,
             m.discoveredModels.length ? table(["Discovered replacement", "Provider", "Key", "Until"], m.discoveredModels.map((r) => [r.model, label(r.provider), r.keyHash, until(r.until)])) : null)
         : el("p", { className: "muted", textContent: "Nothing yet. Retired models, discovered replacements and busy providers appear here. Memory resets when the server restarts." })),

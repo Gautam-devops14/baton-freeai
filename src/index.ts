@@ -15,6 +15,7 @@ import { NVIDIA_BASE_URL, NVIDIA_MODELS } from "./providers/nvidia.js";
 import { OPENAI_BASE_URL, OPENAI_MODELS } from "./providers/openai.js";
 import { OPENROUTER_BASE_URL, OPENROUTER_MODELS } from "./providers/openrouter.js";
 import { WORKSPACE_TTL_SECONDS } from "./services/storage.js";
+import { testKeys } from "./services/keytest.js";
 
 const STARTED_AT = new Date().toISOString();
 import { FileHistoryStore, HISTORY_ID_RE, type HistoryStore } from "./services/history.js";
@@ -113,6 +114,13 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
       unsubscribe();
     });
   });
+
+  // ---- Test API keys with free requests (no tokens spent) ----
+  app.post<{ Body: { keys: OrchestrateRequest["keys"] } }>(
+    "/api/keys/test",
+    { schema: { body: { type: "object", required: ["keys"], properties: { keys: orchestrateSchema.body.properties.keys } } } },
+    async (req) => ({ results: await testKeys(req.body.keys) }),
+  );
 
   // ---- Debug: server configuration and runtime state (never keys or prompts) ----
   app.get("/api/debug", async () => {

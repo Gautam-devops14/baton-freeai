@@ -4,12 +4,17 @@
 
 import { chatCompletion, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
-import { splitBusy } from "../providers/memory.js";
+import { busyUntilFor, splitBusy } from "../providers/memory.js";
 import { log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 import { extractArtifactBody } from "./sanitize.js";
 import { contextFile, originLabel, recordContext } from "./context.js";
 
 const DEFAULT_COOLDOWN_MS = 60_000;
+/** Assumed reset time when a 429 gives no Retry-After hint. */
+const UNKNOWN_RATE_RESET_MS = 10_000;
+/** Longest Baton will wait for a rate limit before giving up on a file (second chance). */
+const maxRateWaitMs = () => Number(process.env.BATON_MAX_RATE_WAIT_MS ?? 20_000);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const PROVIDER_NAMES: Record<string, string> = {
   google: "Google AI Studio",
@@ -119,10 +124,11 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
     logBusySkips(ws, task.id, newlySkipped);
     const candidates = notBusy;
 
-    for (const [i, target] of candidates.entries()) {
+    /** One attempt on one provider. Returns the error on failure, undefined on success. */
+    const attempt = async (target: ProviderTarget, isLast: boolean, nextLabel: string | undefined) => {
       try {
         const result = await chatCompletion(target, messages, {
-          retryOverloaded: i === candidates.length - 1, // last resort: a short wait beats failing the task
+          retryOverloaded: isLast, // last resort: a short wait beats failing the task
           ...traceFor(ws, task.id),
         });
         logModelSwaps(ws, task.id, target.provider, result.skippedModels);
@@ -137,31 +143,54 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
           step: task.id,
         };
         log(ws, task.id, "execute", { ...target, model: result.model }, `Generated ${task.targetArtifact} successfully`, result.usage);
-        break;
+        return undefined;
       } catch (err) {
         const pe =
           err instanceof ProviderError ? err : new ProviderError((err as Error).message ?? String(err), "network");
         logModelSwaps(ws, task.id, target.provider, pe.skippedModels);
         if (pe.kind === "rate_limit" || pe.kind === "server" || pe.kind === "overloaded") {
           cooldowns.set(keyOf(target), now() + (pe.retryAfterMs ?? DEFAULT_COOLDOWN_MS));
-        } else if (pe.kind === "billing" || pe.kind === "auth") {
+        } else if (pe.kind === "billing" || pe.kind === "auth" || pe.kind === "model_unavailable") {
           // Won't fix itself mid-run: stop asking this provider for the rest of the request.
           cooldowns.set(keyOf(target), Number.POSITIVE_INFINITY);
         }
-        const next = candidates[i + 1];
         log(
           ws,
           task.id,
           "failover",
-          { ...target, model: pe.skippedModels.at(-1)?.model ?? target.model },
-          next
-            ? `${pe.reason}; passing baton to ${PROVIDER_NAMES[next.provider] ?? next.provider}`
-            : `${pe.reason}; no providers left for ${task.targetArtifact}`,
+          { ...target, model: pe.model ?? pe.skippedModels.at(-1)?.model ?? target.model },
+          nextLabel ? `${pe.reason}; passing baton to ${nextLabel}` : `${pe.reason}; no providers left for ${task.targetArtifact}`,
         );
+        return { pe, at: now() };
+      }
+    };
+
+    const done = (): boolean => task.status === "completed"; // read fresh: attempt() mutates it
+    const rateLimited: Array<{ target: ProviderTarget; readyAt: number }> = [];
+    for (const [i, target] of candidates.entries()) {
+      const next = candidates[i + 1];
+      const failure = await attempt(target, i === candidates.length - 1, next && (PROVIDER_NAMES[next.provider] ?? next.provider));
+      if (!failure) break;
+      if (failure.pe.kind === "rate_limit" && busyUntilFor(target) === undefined) {
+        rateLimited.push({ target, readyAt: failure.at + (failure.pe.retryAfterMs ?? UNKNOWN_RATE_RESET_MS) });
       }
     }
 
-    if (task.status !== "completed") task.status = "failed";
+    // Second chance: every provider failed, but some were only briefly rate limited
+    // (e.g. Groq's per-minute token cap). Waiting a few seconds beats failing the file.
+    if (!done()) {
+      const maxWait = maxRateWaitMs();
+      for (const { target, readyAt } of rateLimited.sort((a, b) => a.readyAt - b.readyAt)) {
+        const wait = Math.max(0, readyAt - now()) + 250;
+        if (wait > maxWait) continue;
+        log(ws, task.id, "failover", target, `waiting ${(wait / 1000).toFixed(1)}s for ${target.provider}'s rate limit to reset, then retrying`);
+        await sleep(wait);
+        cooldowns.delete(keyOf(target));
+        if (!(await attempt(target, true, undefined))) break;
+      }
+    }
+
+    if (!done()) task.status = "failed";
   }
 
   return ws.tasks.every((t) => t.status === "completed");

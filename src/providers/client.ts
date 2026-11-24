@@ -11,6 +11,7 @@ import {
   markModelDead,
   markProviderBusy,
   rememberDiscoveredModel,
+  SKIP_REASONS,
 } from "./memory.js";
 
 export const DEFAULT_TIMEOUT_MS = Number(process.env.BATON_PROVIDER_TIMEOUT_MS ?? 30_000);
@@ -42,6 +43,9 @@ export class ProviderError extends Error {
     super(message);
     this.name = "ProviderError";
   }
+
+  /** The model whose call raised this error (set by the client). */
+  model?: string;
 
   /** Short human-readable reason used in execution logs. */
   get reason(): string {
@@ -94,6 +98,15 @@ export interface ChatOptions {
 }
 
 const dailyLimitSkipMs = () => Number(process.env.BATON_DAILY_LIMIT_SKIP_MS ?? 3600_000);
+const noCreditSkipMs = () => Number(process.env.BATON_NO_CREDIT_SKIP_MS ?? 3600_000);
+const keyRejectedSkipMs = () => Number(process.env.BATON_KEY_REJECTED_SKIP_MS ?? 600_000);
+const noModelsSkipMs = () => Number(process.env.BATON_NO_MODELS_SKIP_MS ?? 3600_000);
+/** Re-throw a call's error with the model swap history attached. */
+function withHistory(err: ProviderError, skipped: SkippedModel[]): ProviderError {
+  const e = new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skipped, err.detail);
+  e.model = err.model;
+  return e;
+}
 
 /** Read at call time so it can be tuned (or zeroed in tests) without a restart. */
 function overloadRetryDelayMs(): number {
@@ -110,6 +123,14 @@ const BILLING_TEXT = /insufficient_quota|check your plan and billing|billing det
 /** Daily caps (e.g. OpenRouter "free-models-per-day") won't lift in minutes: skip the provider for longer. */
 const DAILY_LIMIT_TEXT = /per[- _]?day|daily (?:limit|quota)|requests per day|RPD/i;
 const OVERLOAD_TEXT = /high demand|overloaded|"UNAVAILABLE"|try again later/i;
+
+/** Retry hint from the Retry-After header, or from text like Groq's "Please try again in 7.66s" / "in 1m2.5s". */
+function retryHint(header: string | null, body: string): number | undefined {
+  const fromHeader = parseRetryAfter(header);
+  if (fromHeader !== undefined) return fromHeader;
+  const m = /try again in (?:(\d+)m)?\s*([\d.]+)\s*s/i.exec(body);
+  return m ? Math.round((Number(m[1] ?? 0) * 60 + Number(m[2])) * 1000) : undefined;
+}
 
 function parseRetryAfter(header: string | null): number | undefined {
   if (!header) return undefined;
@@ -216,7 +237,7 @@ export async function chatCompletion(
         if (!(err instanceof ProviderError)) throw err;
         if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
           // e.g. the fallback model is rate limited: surface it, but keep the swap history.
-          throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels, err.detail);
+          throw withHistory(err, skippedModels);
         }
         if (err.kind === "model_unavailable") {
           unavailable.add(model);
@@ -238,7 +259,7 @@ export async function chatCompletion(
   if (lastError?.kind === "model_unavailable" && target.modelHints && !target.discoveryTried) {
     target.discoveryTried = true;
     const live = (await listModels(target)).filter((id) => !target.modelFilter || target.modelFilter.test(id));
-    const found = rankModels(live, target.modelHints, unavailable);
+    const found = rankModels(live, target.modelHints, unavailable, 5);
     if (found.length && skippedModels.length) {
       Object.assign(skippedModels[skippedModels.length - 1], { next: found[0], nextDiscovered: true });
     }
@@ -252,7 +273,7 @@ export async function chatCompletion(
       } catch (err) {
         if (!(err instanceof ProviderError)) throw err;
         if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
-          throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels, err.detail);
+          throw withHistory(err, skippedModels);
         }
         if (err.kind === "model_unavailable") {
           unavailable.add(model);
@@ -267,6 +288,8 @@ export async function chatCompletion(
   const tried = [target.model, ...(target.fallbackModels ?? [])].join(", ");
   const kind = lastError?.kind === "overloaded" ? "overloaded" : "model_unavailable";
   if (kind === "overloaded") markProviderBusy(target); // skip it for a few minutes in later steps and runs
+  // No configured or discoverable model works: stop trying this provider for a while.
+  else if (target.discoveryTried || !target.modelHints) markProviderBusy(target, noModelsSkipMs(), SKIP_REASONS.noModels);
   throw new ProviderError(
     kind === "overloaded"
       ? `${target.provider} models are overloaded (tried: ${tried}): ${lastError?.message}`
@@ -311,6 +334,7 @@ async function requestOnce(
     return result;
   } catch (err) {
     const pe = err instanceof ProviderError ? err : undefined;
+    if (pe) pe.model ??= model;
     finish({ status: pe?.status, outcome: pe?.kind ?? "error", detail: pe ? pe.reason : String((err as Error)?.message ?? err) });
     throw err;
   }
@@ -361,12 +385,13 @@ async function requestUntraced(
 
   if (!res.ok) {
     const detail = raw.slice(0, 300);
-    const retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
+    const retryAfterMs = retryHint(res.headers.get("retry-after"), raw);
     if ((res.status === 429 || res.status === 402) && BILLING_TEXT.test(detail)) {
+      markProviderBusy(target, noCreditSkipMs(), SKIP_REASONS.noCredit); // won't fix itself soon: skip in later runs too
       throw new ProviderError(`${target.provider} has no credit: ${detail}`, "billing", res.status);
     }
     if (res.status === 429 && DAILY_LIMIT_TEXT.test(detail)) {
-      markProviderBusy(target, dailyLimitSkipMs());
+      markProviderBusy(target, dailyLimitSkipMs(), SKIP_REASONS.dailyLimit);
       throw new ProviderError(`${target.provider} daily limit reached: ${detail}`, "rate_limit", res.status, retryAfterMs, [], providerMessage(raw));
     }
     if (res.status === 429 || RATE_LIMIT_TEXT.test(detail)) {
@@ -381,6 +406,7 @@ async function requestUntraced(
       throw new ProviderError(`${target.provider} model ${model} unavailable: ${detail}`, "model_unavailable", res.status, undefined, [], said);
     }
     if (res.status === 401 || res.status === 403 || (res.status === 400 && BAD_KEY_TEXT.test(detail))) {
+      markProviderBusy(target, keyRejectedSkipMs(), SKIP_REASONS.keyRejected);
       throw new ProviderError(`${target.provider} auth failed: ${detail}`, "auth", res.status, undefined, [], said);
     }
     if (res.status === 503 || (res.status >= 500 && OVERLOAD_TEXT.test(detail))) {

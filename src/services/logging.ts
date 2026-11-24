@@ -85,11 +85,11 @@ export function mergeUsage(list: RunUsage[]): RunUsage {
 export function logBusySkips(
   ws: BatonWorkspace,
   step: number,
-  skipped: Array<{ target: Pick<ProviderTarget, "provider" | "model">; until: number }>,
+  skipped: Array<{ target: Pick<ProviderTarget, "provider" | "model">; until: number; reason?: string }>,
 ): void {
-  for (const { target, until } of skipped) {
+  for (const { target, until, reason } of skipped) {
     const at = new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    log(ws, step, "failover", target, `skipped: every ${target.provider} model was busy (503) in the last few minutes; will try it again after ${at}`);
+    log(ws, step, "failover", target, `skipped: ${target.provider}: ${reason ?? "busy"}; will try it again after ${at}`);
   }
 }
 

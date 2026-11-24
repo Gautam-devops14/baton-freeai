@@ -123,7 +123,7 @@ test("a provider busy on every model is skipped for a few minutes, in later step
   const logs1 = out1.json().executionLogs;
   assert.ok(busyUntilFor(buildTargets(keys, "code").planner.find((t) => t.provider === "google")!), "Gemini marked busy");
   // Within the same run, the build steps skip Gemini (logged once) instead of calling it again.
-  assert.equal(logs1.filter((l: any) => l.message.startsWith("skipped: every google model was busy")).length, 1);
+  assert.equal(logs1.filter((l: any) => l.message.startsWith("skipped: google: every model was busy")).length, 1);
 
   calls.length = 0;
   groqBuilds = true;
@@ -131,7 +131,7 @@ test("a provider busy on every model is skipped for a few minutes, in later step
   const out2 = await withEnv(order, () =>
     app2.inject({ method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build it again", keys } }));
   const logs2 = out2.json().executionLogs;
-  assert.match(logs2[0].message, /^skipped: every google model was busy \(503\) in the last few minutes; will try it again after/);
+  assert.match(logs2[0].message, /^skipped: google: every model was busy \(503\) in the last few minutes; will try it again after/);
   assert.equal(out2.json().status, "success");
   assert.ok(!calls.some((c) => host(c.url).includes("generativelanguage")), "Gemini not called at all in the next run");
 });
@@ -178,7 +178,7 @@ test("follow-up: edits the existing project with full context, keeps untouched f
   const appStep = prompts.task.find((p) => p.includes("Produce the full contents of `app.js`"))!;
   assert.match(appStep, /## Earlier requests \(oldest first\)\n1\. Student marks app\n\n## Current request\nadd a logo and a delete button/);
   assert.match(appStep, /## Current contents of `app\.js` \(rewrite the WHOLE file/);
-  assert.match(appStep, /=== index\.html === \(written by nvidia\/qwen\/qwen3-coder-480b-a35b-instruct\)/);
+  assert.match(appStep, /=== index\.html === \(written by nvidia\/moonshotai\/kimi-k2-instruct\)/);
 
   // Result: full merged project; logo.png planned as SVG; changes reported.
   assert.deepEqual(Object.keys(second.artifacts).sort(), ["app.js", "index.html", "logo.svg"]);
@@ -229,7 +229,7 @@ test("each step records what it was given: files with who wrote them, decisions,
   assert.deepEqual(step1.files, []);
   assert.equal(step2.target, "app.js");
   assert.deepEqual(step2.decisions, { framework: "vanilla" });
-  assert.deepEqual(step2.files.map((f: any) => [f.path, f.source, f.by]), [["index.html", "this-run", "nvidia/qwen/qwen3-coder-480b-a35b-instruct"]]);
+  assert.deepEqual(step2.files.map((f: any) => [f.path, f.source, f.by]), [["index.html", "this-run", "nvidia/moonshotai/kimi-k2-instruct"]]);
   assert.ok(step2.promptTokens > 0);
   assert.match(step2.messages[1].content, /=== index\.html === \(written by nvidia\//);
   // The same context went to Groq after NVIDIA failed: the log shows both attempts for step 2.

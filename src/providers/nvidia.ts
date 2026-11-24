@@ -16,8 +16,9 @@ const list = (env: string | undefined, fallback: string[]) => {
  * list. Override with NVIDIA_CODE_MODELS / NVIDIA_GENERAL_MODELS.
  */
 export const NVIDIA_MODELS = {
-  code: list(process.env.NVIDIA_CODE_MODELS, ["qwen/qwen3-coder-480b-a35b-instruct", "openai/gpt-oss-120b"]),
-  general: list(process.env.NVIDIA_GENERAL_MODELS, ["openai/gpt-oss-120b", "meta/llama-4-maverick-17b-128e-instruct"]),
+  // qwen3-coder-480b (EOL 2026-06-11) and gpt-oss-120b (EOL 2026-09-03) are retired on NVIDIA.
+  code: list(process.env.NVIDIA_CODE_MODELS, ["moonshotai/kimi-k2-instruct", "deepseek-ai/deepseek-v3.1"]),
+  general: list(process.env.NVIDIA_GENERAL_MODELS, ["deepseek-ai/deepseek-v3.1", "moonshotai/kimi-k2-instruct"]),
 };
 
 export function nvidiaTarget(apiKey: string, taskType: TaskType): ProviderTarget {
@@ -31,9 +32,12 @@ export function nvidiaTarget(apiKey: string, taskType: TaskType): ProviderTarget
     // Not every NIM model accepts response_format; the planner prompt already demands JSON
     // and the plan parser tolerates prose around it.
     supportsJsonMode: false,
+    // Discovery only considers chat/instruct models: NVIDIA also lists code-completion
+    // models (e.g. starcoder2) that its chat endpoint answers with 404.
+    modelFilter: /instruct|chat|kimi|deepseek|qwen3|gpt-oss|nemotron|mistral|mixtral|llama-4/i,
     modelHints:
       taskType === "code"
-        ? ["coder", "gpt-oss-120b", "deepseek-v3", "llama-4-maverick", "llama-3.3-70b", "70b", "instruct"]
-        : ["gpt-oss-120b", "llama-4-maverick", "deepseek-v3", "llama-3.3-70b", "70b", "instruct"],
+        ? [/qwen3?-coder.*instruct/, /deepseek-v3/, /kimi/, /gpt-oss/, /llama-4/, /nemotron.*(super|ultra)/, /70b.*instruct/, /instruct/]
+        : [/deepseek-v3/, /kimi/, /gpt-oss/, /llama-4/, /nemotron.*(super|ultra)/, /70b.*instruct/, /instruct/],
   };
 }

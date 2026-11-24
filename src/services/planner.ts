@@ -197,7 +197,7 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
         "failover",
         {
           ...target,
-          model: result?.model ?? (err instanceof ProviderError ? err.skippedModels.at(-1)?.model : undefined) ?? target.model,
+          model: result?.model ?? (err instanceof ProviderError ? err.model ?? err.skippedModels.at(-1)?.model : undefined) ?? target.model,
         },
         next ? `${reason}; passing planning to ${next.provider}` : `${reason}; no planners left`,
         result?.usage,
