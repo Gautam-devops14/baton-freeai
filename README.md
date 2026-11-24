@@ -1,6 +1,6 @@
 # Baton
 
-A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project with Gemini 3.8 Flash, builds each artifact on Groq, and when Groq returns a 429 or times out it hands the work to Gemini. Optional NVIDIA NIM (free developer tier) and OpenAI (paid) keys add more fallback tiers. The task keeps going without restarting, because all context lives in a shared workspace rather than in any one model's chat history.
+A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project with Gemini 3.8 Flash, builds each artifact on Groq, and when Groq returns a 429 or times out it hands the work to Gemini. Supported providers: NVIDIA NIM, Groq, Gemini, OpenRouter (free `:free` models) and OpenAI (paid). Add any combination of keys; more keys mean more fallbacks. The task keeps going without restarting, because all context lives in a shared workspace rather than in any one model's chat history.
 
 ## Quick start
 
@@ -13,7 +13,19 @@ npm run build && npm start
 
 ## Web UI
 
-Open http://localhost:3000, paste any of your Groq, Gemini, NVIDIA NIM or OpenAI keys, describe a project and click **Run**. You'll see the relay log, each generated file, and a .zip download link. Keys are only stored in your browser if you tick "Remember keys".
+Open http://localhost:3000. It works like a typical AI chat app:
+
+* **Sidebar:** **+ New chat**, your chats (a project plus its follow-ups), token usage, **Settings & API keys**, and the **Debug panel** toggle.
+* **Thread:** your messages, and Baton's replies with status, files (click to view), **Download .zip**, tokens, and which providers did the work.
+* **Composer:** Enter sends, Shift+Enter adds a new line. In an open chat your message **continues that project** (a follow-up); **+ New chat** starts a fresh one.
+* **Live progress:** while a run is going you see each step as it happens: planning, each provider call (✓ / ✗ with the reason, time and tokens), failovers and files written.
+* **Debug panel:**
+  * **This run:** overview, live event stream, every provider HTTP call (status, latency, tokens), tokens by model, the relay log, how context was shared (including the exact prompts) and the raw saved record.
+  * **Server:** provider order, model lists, timeouts, what Baton remembers (retired models, discovered replacements, busy providers, with a **Forget all** button) and recent provider calls across all runs.
+
+Keys are only stored in your browser if you tick "Remember keys".
+
+API for the debug features: `GET /api/progress/:clientRunId` (Server-Sent Events; send the same `clientRunId` with the orchestrate request), `GET /api/debug`, `DELETE /api/debug/memory`. Runs also carry `chatId` and `calls`.
 
 ## Follow-ups
 
@@ -23,6 +35,10 @@ Click **Continue this project** on any run with files, then type what to change 
 * gives each build step the current version of the file it rewrites, plus every other project file
 * returns the **whole project**: unchanged files are carried over, and the result lists what was changed and what was added
 * stays in follow-up mode (even after a refresh), so the next prompt continues from the newest version. Use **Start a new project instead** to leave.
+
+## OpenRouter
+
+One key (from openrouter.ai/keys) gives access to many models. Baton only ever uses the **free** ones (IDs ending in `:free`), including when it discovers replacements, so it never spends credits. Free use is capped at about 50 requests a day: when OpenRouter reports that daily cap, Baton skips it for an hour (`BATON_DAILY_LIMIT_SKIP_MS`) instead of retrying every run. Models: `OPENROUTER_CODE_MODELS` / `OPENROUTER_GENERAL_MODELS`.
 
 ## Text files only
 
@@ -74,13 +90,13 @@ Every prompt you send is saved, along with its result, relay log and generated f
 curl -s localhost:3000/api/orchestrate -H 'content-type: application/json' -d '{
   "userPrompt": "Create an Express.js authentication service with JWT and bcrypt",
   "taskType": "code",
-  "keys": { "groqApiKey": "gsk_...", "geminiApiKey": "AIza...", "nvidiaApiKey": "nvapi-...", "openaiApiKey": "sk-..." }
+  "keys": { "nvidiaApiKey": "nvapi-...", "groqApiKey": "gsk_...", "geminiApiKey": "AIza...", "openrouterApiKey": "sk-or-...", "openaiApiKey": "sk-..." }
 }'
 ```
 
 * `taskType`: `code` (default), `document`, or `analysis`.
 * `keys`: at least one is required (BYOK). With only one key, Baton runs single-provider and loses failover.
-  * Default order for both planning and building: **NVIDIA NIM → Groq → Gemini → OpenAI**. Change it with `BATON_PROVIDER_ORDER=groq,nvidia,google,openai`, or for one stage only with `BATON_PLANNER_ORDER` / `BATON_RELAY_ORDER`.
+  * Default order for both planning and building: **NVIDIA NIM → Groq → Gemini → OpenRouter → OpenAI**. Change it with `BATON_PROVIDER_ORDER=groq,nvidia,google,openai`, or for one stage only with `BATON_PLANNER_ORDER` / `BATON_RELAY_ORDER`.
   * `continueFrom` (optional): a history id. The run then **changes that project** instead of starting a new one (see Follow-ups).
   * Default models: see `.env.example`. Each provider has an ordered model list (`GROQ_*_MODELS`, `GEMINI_MODELS`, `NVIDIA_*_MODELS`, `OPENAI_MODELS`).
   * NVIDIA NIM uses `integrate.api.nvidia.com`, with keys from build.nvidia.com.

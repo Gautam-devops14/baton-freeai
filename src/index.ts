@@ -13,6 +13,7 @@ import { GROQ_BASE_URL, GROQ_MODELS } from "./providers/groq.js";
 import { GEMINI_BASE_URL, GEMINI_MODELS } from "./providers/gemini.js";
 import { NVIDIA_BASE_URL, NVIDIA_MODELS } from "./providers/nvidia.js";
 import { OPENAI_BASE_URL, OPENAI_MODELS } from "./providers/openai.js";
+import { OPENROUTER_BASE_URL, OPENROUTER_MODELS } from "./providers/openrouter.js";
 import { WORKSPACE_TTL_SECONDS } from "./services/storage.js";
 
 const STARTED_AT = new Date().toISOString();
@@ -42,6 +43,7 @@ const orchestrateSchema = {
           geminiApiKey: { type: "string", maxLength: 512 },
           openaiApiKey: { type: "string", maxLength: 512 },
           nvidiaApiKey: { type: "string", maxLength: 512 },
+          openrouterApiKey: { type: "string", maxLength: 512 },
         },
       },
     },
@@ -129,13 +131,15 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         groq: GROQ_MODELS,
         google: GEMINI_MODELS,
         nvidia: NVIDIA_MODELS,
+        openrouter: OPENROUTER_MODELS,
         openai: OPENAI_MODELS,
       },
-      endpoints: { groq: GROQ_BASE_URL, google: GEMINI_BASE_URL, nvidia: NVIDIA_BASE_URL, openai: OPENAI_BASE_URL },
+      endpoints: { groq: GROQ_BASE_URL, google: GEMINI_BASE_URL, nvidia: NVIDIA_BASE_URL, openrouter: OPENROUTER_BASE_URL, openai: OPENAI_BASE_URL },
       settings: {
         providerTimeoutMs: DEFAULT_TIMEOUT_MS,
         overloadRetryMs: Number(process.env.BATON_OVERLOAD_RETRY_MS ?? 2000),
         busySkipMs: Number(process.env.BATON_BUSY_SKIP_MS ?? 300_000),
+        dailyLimitSkipMs: Number(process.env.BATON_DAILY_LIMIT_SKIP_MS ?? 3_600_000),
         deadModelTtlMs: Number(process.env.BATON_DEAD_MODEL_TTL_MS ?? 86_400_000),
         workspaceTtlSec: WORKSPACE_TTL_SECONDS,
         historyMax: Number(process.env.BATON_HISTORY_MAX ?? 500),

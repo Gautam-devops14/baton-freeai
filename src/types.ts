@@ -145,6 +145,7 @@ export interface ProviderKeys {
   geminiApiKey?: string;
   openaiApiKey?: string;
   nvidiaApiKey?: string;
+  openrouterApiKey?: string;
 }
 
 /** Live progress events streamed to the browser while a run is in flight. */
@@ -222,6 +223,10 @@ export interface ProviderTarget {
   supportsJsonMode?: boolean;
   /** Preference order used to pick a model from the provider's live list when all configured models are retired. */
   modelHints?: Array<string | RegExp>;
+  /** Discovery may only pick model IDs matching this (e.g. OpenRouter ":free" models). */
+  modelFilter?: RegExp;
+  /** Extra non-secret request headers. */
+  extraHeaders?: Record<string, string>;
   /** Filled in at runtime: model discovery already ran for this target in the current request. */
   discoveryTried?: boolean;
   baseUrl: string;

@@ -213,7 +213,7 @@ export interface PlanAttempt {
   reason: string;
 }
 
-const PROVIDER_LABEL: Record<string, string> = { google: "Gemini", groq: "Groq", openai: "OpenAI", nvidia: "NVIDIA NIM" };
+const PROVIDER_LABEL: Record<string, string> = { google: "Gemini", groq: "Groq", openai: "OpenAI", nvidia: "NVIDIA NIM", openrouter: "OpenRouter" };
 
 const HINTS: Record<string, (provider: string) => string> = {
   overloaded: (p) => `${p}'s servers are busy right now; this is usually temporary, so try again in a minute`,
@@ -241,9 +241,9 @@ export class PlanningError extends Error {
       .filter((h, i, all): h is string => Boolean(h) && all.indexOf(h) === i);
     const parts = [`Planning failed (${summary}).`];
     if (hints.length) parts.push(`What to do: ${hints.join("; ")}.`);
-    if (providerCount < 4) {
+    if (providerCount < 5) {
       const used = new Set(attempts.map((a) => a.provider));
-      const missing = ["groq", "google", "nvidia", "openai"].filter((p) => !used.has(p)).map(label);
+      const missing = ["groq", "google", "nvidia", "openrouter", "openai"].filter((p) => !used.has(p)).map(label);
       const names = missing.length > 1 ? `${missing.slice(0, -1).join(", ")} or ${missing[missing.length - 1]}` : missing[0];
       if (missing.length) parts.push(`Tip: adding a ${names} key gives Baton more providers to fall back on.`);
     }

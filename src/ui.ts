@@ -288,7 +288,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     if (s < 86400) return Math.floor(s / 3600) + " h ago";
     return new Date(iso).toLocaleDateString();
   }
-  const PROVIDER_LABEL = { groq: "Groq", google: "Gemini", nvidia: "NVIDIA NIM", openai: "OpenAI", baton: "Baton" };
+  const PROVIDER_LABEL = { groq: "Groq", google: "Gemini", nvidia: "NVIDIA NIM", openrouter: "OpenRouter", openai: "OpenAI", baton: "Baton" };
   const STATUS_TEXT = { success: "Done", partial: "Partly done", failed: "Failed", error: "Error", gated: "Answered locally" };
 
   // ===================== API keys (Settings) =====================
@@ -296,9 +296,10 @@ export const UI_HTML = /* html */ `<!doctype html>
     ["nvidia", "nvidiaApiKey", "NVIDIA NIM", "nvapi-...", "https://build.nvidia.com"],
     ["groq", "groqApiKey", "Groq", "gsk_...", "https://console.groq.com/keys"],
     ["gemini", "geminiApiKey", "Gemini", "AIza...", "https://aistudio.google.com/apikey"],
+    ["openrouter", "openrouterApiKey", "OpenRouter (free models, ~50 requests/day)", "sk-or-...", "https://openrouter.ai/keys"],
     ["openai", "openaiApiKey", "OpenAI (paid)", "sk-...", "https://platform.openai.com/api-keys"],
   ];
-  const keys = { nvidia: "", groq: "", gemini: "", openai: "" };
+  const keys = { nvidia: "", groq: "", gemini: "", openrouter: "", openai: "" };
   let remember = store.get("baton.remember") === "1";
   if (remember) for (const [k] of KEY_FIELDS) keys[k] = store.get("baton." + k) || "";
   const keyCount = () => KEY_FIELDS.filter(([k]) => keys[k].trim()).length;
@@ -863,9 +864,10 @@ export const UI_HTML = /* html */ `<!doctype html>
         ["Groq", d.models.groq.code.join(", "), d.models.groq.general.join(", ")],
         ["Gemini", d.models.google.join(", "), "same"],
         ["NVIDIA NIM", d.models.nvidia.code.join(", "), d.models.nvidia.general.join(", ")],
+        ["OpenRouter", d.models.openrouter.code.join(", "), d.models.openrouter.general.join(", ")],
         ["OpenAI", d.models.openai.join(", "), "same"],
       ])),
-      sec("Settings", "", kv([["Provider timeout", d.settings.providerTimeoutMs + " ms"], ["Overload retry wait", d.settings.overloadRetryMs + " ms"], ["Busy provider skip", Math.round(d.settings.busySkipMs / 60000) + " min"], ["Retired model memory", Math.round(d.settings.deadModelTtlMs / 3600000) + " h"], ["Download links", Math.round(d.settings.workspaceTtlSec / 60) + " min, then from history"], ["History limit", d.settings.historyMax + " runs"]])),
+      sec("Settings", "", kv([["Provider timeout", d.settings.providerTimeoutMs + " ms"], ["Overload retry wait", d.settings.overloadRetryMs + " ms"], ["Busy provider skip", Math.round(d.settings.busySkipMs / 60000) + " min"], ["Daily-limit skip", Math.round(d.settings.dailyLimitSkipMs / 60000) + " min"], ["Retired model memory", Math.round(d.settings.deadModelTtlMs / 3600000) + " h"], ["Download links", Math.round(d.settings.workspaceTtlSec / 60) + " min, then from history"], ["History limit", d.settings.historyMax + " runs"]])),
       sec("What Baton remembers", forget, remembered
         ? el("div", {},
             m.busyProviders.length ? table(["Busy provider (skipped)", "Key", "Until"], m.busyProviders.map((b) => [label(b.provider), b.keyHash, until(b.until)])) : null,

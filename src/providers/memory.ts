@@ -70,8 +70,8 @@ export function busyUntilFor(t: ProviderTarget): number | undefined {
   return until;
 }
 
-export function markProviderBusy(t: ProviderTarget): void {
-  const ms = busySkipMs();
+export function markProviderBusy(t: ProviderTarget, forMs?: number): void {
+  const ms = forMs ?? busySkipMs();
   if (ms > 0) busyUntil.set(account(t), now() + ms);
 }
 

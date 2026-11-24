@@ -49,12 +49,15 @@ test("default order is NVIDIA -> Groq -> Gemini -> OpenAI for planning and build
     const t = buildTargets(ALL, "code");
     assert.deepEqual(t.planner.map((x) => x.provider), ["nvidia", "groq", "google", "openai"]);
     assert.deepEqual(t.relay.map((x) => x.provider), ["nvidia", "groq", "google", "openai"]);
+    // With an OpenRouter key too, it slots in before paid OpenAI.
+    const all5 = buildTargets({ ...ALL, openrouterApiKey: "r" }, "code");
+    assert.deepEqual(all5.relay.map((x) => x.provider), ["nvidia", "groq", "google", "openrouter", "openai"]);
   });
 });
 
 test("order is configurable; 'gemini' is accepted, unknown names ignored, missing providers appended", () => {
   withEnv({ BATON_PLANNER_ORDER: undefined, BATON_RELAY_ORDER: undefined, BATON_PROVIDER_ORDER: "gemini, groq, bogus" }, () => {
-    assert.deepEqual(providerOrder("relay"), ["google", "groq", "nvidia", "openai"]);
+    assert.deepEqual(providerOrder("relay"), ["google", "groq", "nvidia", "openrouter", "openai"]);
   });
 });
 

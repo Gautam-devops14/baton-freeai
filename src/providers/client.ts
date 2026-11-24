@@ -93,6 +93,8 @@ export interface ChatOptions {
   traceMeta?: { runId?: string; step?: number };
 }
 
+const dailyLimitSkipMs = () => Number(process.env.BATON_DAILY_LIMIT_SKIP_MS ?? 3600_000);
+
 /** Read at call time so it can be tuned (or zeroed in tests) without a restart. */
 function overloadRetryDelayMs(): number {
   return Number(process.env.BATON_OVERLOAD_RETRY_MS ?? 2000);
@@ -104,7 +106,9 @@ const RATE_LIMIT_TEXT = /rate.?limit|quota|too many requests|resource.?exhausted
 /** Google answers a bad key with HTTP 400 "API key not valid", not 401. */
 const BAD_KEY_TEXT = /api[ _-]?key not valid|invalid api[ _-]?key|incorrect api key|API_KEY_INVALID/i;
 /** OpenAI answers 429 + insufficient_quota when the account has no credit: not temporary. */
-const BILLING_TEXT = /insufficient_quota|check your plan and billing|billing details|credit balance is too low/i;
+const BILLING_TEXT = /insufficient_quota|check your plan and billing|billing details|credit balance is too low|insufficient credits/i;
+/** Daily caps (e.g. OpenRouter "free-models-per-day") won't lift in minutes: skip the provider for longer. */
+const DAILY_LIMIT_TEXT = /per[- _]?day|daily (?:limit|quota)|requests per day|RPD/i;
 const OVERLOAD_TEXT = /high demand|overloaded|"UNAVAILABLE"|try again later/i;
 
 function parseRetryAfter(header: string | null): number | undefined {
@@ -233,7 +237,8 @@ export async function chatCompletion(
   // Every configured model is retired: ask the provider what it serves today (once per run).
   if (lastError?.kind === "model_unavailable" && target.modelHints && !target.discoveryTried) {
     target.discoveryTried = true;
-    const found = rankModels(await listModels(target), target.modelHints, unavailable);
+    const live = (await listModels(target)).filter((id) => !target.modelFilter || target.modelFilter.test(id));
+    const found = rankModels(live, target.modelHints, unavailable);
     if (found.length && skippedModels.length) {
       Object.assign(skippedModels[skippedModels.length - 1], { next: found[0], nextDiscovered: true });
     }
@@ -338,6 +343,7 @@ async function requestUntraced(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...target.extraHeaders,
         Authorization: `Bearer ${target.apiKey}`,
       },
       body: JSON.stringify(body),
@@ -358,6 +364,10 @@ async function requestUntraced(
     const retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
     if ((res.status === 429 || res.status === 402) && BILLING_TEXT.test(detail)) {
       throw new ProviderError(`${target.provider} has no credit: ${detail}`, "billing", res.status);
+    }
+    if (res.status === 429 && DAILY_LIMIT_TEXT.test(detail)) {
+      markProviderBusy(target, dailyLimitSkipMs());
+      throw new ProviderError(`${target.provider} daily limit reached: ${detail}`, "rate_limit", res.status, retryAfterMs, [], providerMessage(raw));
     }
     if (res.status === 429 || RATE_LIMIT_TEXT.test(detail)) {
       throw new ProviderError(`${target.provider} rate limited: ${detail}`, "rate_limit", res.status, retryAfterMs);

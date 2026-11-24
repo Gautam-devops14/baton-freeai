@@ -5,6 +5,7 @@ import { geminiTarget } from "../providers/gemini.js";
 import { groqTarget } from "../providers/groq.js";
 import { nvidiaTarget } from "../providers/nvidia.js";
 import { openaiTarget } from "../providers/openai.js";
+import { openrouterTarget } from "../providers/openrouter.js";
 import type {
   BatonWorkspace,
   GatedResponse,
@@ -32,7 +33,7 @@ export class FollowUpError extends Error {
 
 export class MissingKeysError extends Error {
   constructor() {
-    super("Provide at least one API key: keys.groqApiKey, keys.geminiApiKey, keys.nvidiaApiKey or keys.openaiApiKey (BYOK).");
+    super("Provide at least one API key: keys.groqApiKey, keys.geminiApiKey, keys.nvidiaApiKey, keys.openrouterApiKey or keys.openaiApiKey (BYOK).");
     this.name = "MissingKeysError";
   }
 }
@@ -55,15 +56,16 @@ export function buildTargets(
   const groq = keys.groqApiKey ? groqTarget(keys.groqApiKey, taskType) : undefined;
   const nvidia = keys.nvidiaApiKey ? nvidiaTarget(keys.nvidiaApiKey, taskType) : undefined;
   const openai = keys.openaiApiKey ? openaiTarget(keys.openaiApiKey) : undefined;
-  const byName: Record<string, ProviderTarget | undefined> = { nvidia, groq, google: gemini, openai };
+  const openrouter = keys.openrouterApiKey ? openrouterTarget(keys.openrouterApiKey, taskType) : undefined;
+  const byName: Record<string, ProviderTarget | undefined> = { nvidia, groq, google: gemini, openrouter, openai };
   const ordered = (order: string[]) =>
     order.map((name) => byName[name]).filter((x): x is ProviderTarget => Boolean(x));
   return { planner: ordered(providerOrder("planner")), relay: ordered(providerOrder("relay")) };
 }
 
-const KNOWN_PROVIDERS = ["nvidia", "groq", "google", "openai"];
-/** Default waterfall: NVIDIA, then Groq, then Gemini (often overloaded), then paid OpenAI last. */
-export const DEFAULT_PROVIDER_ORDER = ["nvidia", "groq", "google", "openai"];
+const KNOWN_PROVIDERS = ["nvidia", "groq", "google", "openrouter", "openai"];
+/** Default waterfall: NVIDIA, Groq, Gemini (often overloaded), OpenRouter (free, ~50 requests/day), then paid OpenAI last. */
+export const DEFAULT_PROVIDER_ORDER = ["nvidia", "groq", "google", "openrouter", "openai"];
 
 /**
  * Provider order from BATON_PROVIDER_ORDER (both stages) or BATON_PLANNER_ORDER /
@@ -97,11 +99,13 @@ export async function orchestrate(
     geminiApiKey: req.keys?.geminiApiKey?.trim() || undefined,
     openaiApiKey: req.keys?.openaiApiKey?.trim() || undefined,
     nvidiaApiKey: req.keys?.nvidiaApiKey?.trim() || undefined,
+    openrouterApiKey: req.keys?.openrouterApiKey?.trim() || undefined,
   };
   const providers = [
     keys.groqApiKey && "groq",
     keys.geminiApiKey && "google",
     keys.nvidiaApiKey && "nvidia",
+    keys.openrouterApiKey && "openrouter",
     keys.openaiApiKey && "openai",
   ].filter((p): p is string => Boolean(p));
 

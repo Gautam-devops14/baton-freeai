@@ -46,7 +46,7 @@ test("every provider call is traced on the run (status, latency, tokens) and in 
   assert.equal(rec.calls.length, 4);
 
   const dbg = (await app.inject({ method: "GET", url: "/api/debug" })).json();
-  assert.deepEqual(dbg.providerOrder.relay, ["groq", "google", "nvidia", "openai"]);
+  assert.deepEqual(dbg.providerOrder.relay, ["groq", "google", "nvidia", "openai", "openrouter"]);
   assert.equal(dbg.models.groq.code[0], "openai/gpt-oss-120b");
   assert.ok(dbg.settings.providerTimeoutMs > 0);
   assert.ok(dbg.recentCalls.some((c: any) => c.runId === out.historyId && c.status === 429));

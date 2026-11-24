@@ -15,6 +15,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   google: "Google AI Studio",
   groq: "Groq",
   nvidia: "NVIDIA NIM",
+  openrouter: "OpenRouter",
   openai: "OpenAI",
 };
 
