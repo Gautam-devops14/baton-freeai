@@ -7,6 +7,8 @@ import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../
 import { busyUntilFor, splitBusy } from "../providers/memory.js";
 import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 import { extractArtifactBody } from "./sanitize.js";
+import { outlineFile } from "./outline.js";
+import { estimateTokens } from "../providers/client.js";
 import { contextFile, originLabel, recordContext } from "./context.js";
 
 const DEFAULT_COOLDOWN_MS = 60_000;
@@ -45,13 +47,18 @@ export function buildTaskPrompt(ws: BatonWorkspace, task: BatonTask): { messages
     ...untouched.map((p) => `- [=] ${p} — existing file, unchanged`),
   ].join("\n");
 
-  // Every file in the shared workspace except the one being written, labelled with who wrote it.
-  const shared = sharedFiles(ws, task)
-    .map((p) => {
+  // Shared files, labelled with who wrote them: in full where this step needs them, as outlines otherwise.
+  const pick = selectContext(ws, task);
+  const shared = [
+    ...pick.full.map((p) => {
       const by = originLabel(ws, p);
       return `=== ${p} ===${by ? ` (written by ${by})` : ""}\n${ws.artifacts[p]}`;
-    })
-    .join("\n");
+    }),
+    ...pick.outline.map((p) => {
+      const by = originLabel(ws, p);
+      return `=== ${p} === (outline only${by ? `, written by ${by}` : ""}; full text not needed for this step)\n${outlineFile(p, ws.artifacts[p])}`;
+    }),
+  ].join("\n");
   const current = ws.artifacts[task.targetArtifact];
   const isFollowUp = Boolean(ws.conversation?.length);
 
@@ -100,9 +107,36 @@ export function buildTaskMessages(ws: BatonWorkspace, task: BatonTask): ChatMess
   return buildTaskPrompt(ws, task).messages;
 }
 
-/** Paths whose full text goes into a task's prompt: everything in the workspace except the target. */
+/** Every file in the workspace except the one being written. */
 function sharedFiles(ws: BatonWorkspace, task: BatonTask): string[] {
   return Object.keys(ws.artifacts).filter((p) => p !== task.targetArtifact);
+}
+
+/** Size cap for full file text in a step's prompt when the plan doesn't say which files a step uses. */
+const contextFullChars = () => Number(process.env.BATON_CONTEXT_FULL_CHARS ?? 12_000);
+
+/**
+ * Which shared files go in full and which as outlines, to keep context (and cost) down:
+ *  - the plan lists what a file `uses` -> only those in full
+ *  - no list -> full text, newest first, up to BATON_CONTEXT_FULL_CHARS; the rest as outlines
+ */
+export function selectContext(ws: BatonWorkspace, task: BatonTask): { full: string[]; outline: string[] } {
+  const all = sharedFiles(ws, task);
+  if (task.uses?.length) {
+    const wanted = new Set(task.uses);
+    return { full: all.filter((p) => wanted.has(p)), outline: all.filter((p) => !wanted.has(p)) };
+  }
+  const order = [...all].reverse(); // most recently written first
+  const full: string[] = [];
+  let budget = contextFullChars();
+  for (const p of order) {
+    const n = ws.artifacts[p].length;
+    if (n <= budget) {
+      full.push(p);
+      budget -= n;
+    }
+  }
+  return { full: all.filter((p) => full.includes(p)), outline: all.filter((p) => !full.includes(p)) };
 }
 
 export interface RelayOptions {
@@ -132,7 +166,13 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         target: task.targetArtifact,
         targetExisted: ws.artifacts[task.targetArtifact] !== undefined,
         manifest: [...new Set([...ws.tasks.map((t) => t.targetArtifact), ...Object.keys(ws.artifacts)])],
-        files: sharedFiles(ws, task).map((p) => contextFile(ws, p)),
+        files: (() => {
+          const pick = selectContext(ws, task);
+          return [
+            ...pick.full.map((p) => contextFile(ws, p)),
+            ...pick.outline.map((p) => ({ ...contextFile(ws, p), mode: "outline" as const, tokens: estimateTokens(outlineFile(p, ws.artifacts[p])) })),
+          ];
+        })(),
       },
       messages,
     );

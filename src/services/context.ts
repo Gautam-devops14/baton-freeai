@@ -19,6 +19,7 @@ export function contextFile(ws: BatonWorkspace, path: string): ContextFile {
     source: o && o.runId === ws.workspaceId ? "this-run" : "previous",
     by: o ? `${o.provider}/${o.model}` : undefined,
     tokens: estimateTokens(ws.artifacts[path] ?? ""),
+    mode: "full",
   };
 }
 

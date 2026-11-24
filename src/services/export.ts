@@ -68,7 +68,7 @@ function contextSummary(c: StepContext, rec: HistoryRecord): string {
   const files = c.files.map((f) => {
     const o = rec.artifactOrigins?.[f.path];
     const from = f.source === "previous" ? "earlier run" : o ? `step ${o.step}` : "this run";
-    return `\`${f.path}\` (~${fmt(f.tokens)} tok, from ${from}${f.by ? `, ${f.by}` : ""})`;
+    return `\`${f.path}\`${f.mode === "outline" ? " outline" : ""} (~${fmt(f.tokens)} tok, from ${from}${f.by ? `, ${f.by}` : ""})`;
   });
   if (files.length) parts.push(`full text of ${files.join(", ")}`);
   if (c.targetExisted) parts.push(`the current \`${c.target}\` to rewrite`);

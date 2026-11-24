@@ -7,6 +7,8 @@ import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../
 import { safeArtifactPath } from "./paths.js";
 import { splitBusy } from "../providers/memory.js";
 import { contextFile, recordContext } from "./context.js";
+import { outlineFile } from "./outline.js";
+import { estimateTokens } from "../providers/client.js";
 import { attachBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 
 /** We ask for 2-4 tasks (spec), but accept a 1-task plan rather than failing a small request. */
@@ -53,14 +55,17 @@ export function buildPlannerMessages(ws: BatonWorkspace): ChatMessage[] {
           'a full, clear explanation (Markdown allowed) when asked to explain code or concepts. ' +
           'For follow-ups you can see the project files, so you can explain them.',
         "- Only if the user asks you to create, build, write, fix or change something, plan files as described below.",
-        `When planning, decompose the user's objective into ${MIN_TASKS} to ${MAX_TASKS} atomic artifacts. Each task produces exactly ONE artifact.`,
+        `When planning, use the FEWEST files that do the job well: 1 to ${MAX_TASKS} (a simple page can be a single index.html ` +
+          "with inline CSS and JS). Each task produces exactly ONE artifact. Fewer files means fewer calls and less cost.",
+        'For each task, list in "uses" the earlier files it must match (e.g. app.js uses index.html for element ids). ' +
+          "Only those are sent to it in full, so keep the list short but complete.",
         TASK_TYPE_GUIDANCE[ws.taskType],
         "Every artifact must be a plain-text file (source code, HTML, CSS, JSON, Markdown, CSV, SVG...). " +
           "Never plan binary files such as .png, .jpg, .gif, .ico, .pdf, .zip or fonts: a text model cannot produce them. " +
           "Draw logos, icons and illustrations as SVG (a .svg file or inline <svg> in HTML).",
         "Order tasks so that dependencies come before the artifacts that consume them.",
         "Respond with ONLY a JSON object, no prose: either {\"answer\": \"...\"} or",
-        '{"decisions": {"<key>": "<string value>", ...}, "tasks": [{"title": "<what to build>", "targetArtifact": "<relative path>"}]}',
+        '{"decisions": {"<key>": "<string value>", ...}, "tasks": [{"title": "<what to build>", "targetArtifact": "<relative path>", "uses": ["<earlier path>"]}]}',
       ].join("\n"),
     },
     { role: "user", content: plannerUserMessage(ws) },
@@ -68,7 +73,7 @@ export function buildPlannerMessages(ws: BatonWorkspace): ChatMessage[] {
 }
 
 /** Planner input: the request, plus (for follow-ups) the earlier requests and the existing files. */
-export const MAX_PLANNER_FILE_CHARS = 40_000;
+export const MAX_PLANNER_FILE_CHARS = 16_000;
 
 function existingFilesForPlanner(ws: BatonWorkspace): { included: string[]; listed: string[] } {
   let budget = MAX_PLANNER_FILE_CHARS;
@@ -97,7 +102,7 @@ function plannerUserMessage(ws: BatonWorkspace): string {
     `## New request\n${ws.userPrompt}`,
     `## Existing project files\n${files.map((f) => `- ${f}`).join("\n")}`,
     included.length ? `## Current contents\n${included.map((f) => `=== ${f} ===\n${ws.artifacts[f]}`).join("\n")}` : "",
-    listed.length ? `(Contents of ${listed.join(", ")} omitted for length.)` : "",
+    listed.length ? `## Outlines of the other files (full text omitted to save tokens)\n${listed.map((f) => `=== ${f} ===\n${outlineFile(f, ws.artifacts[f])}`).join("\n")}` : "",
     "## Rules for follow-ups\n" +
       "- Plan ONLY the files that must change or be added for the new request (1 to 4).\n" +
       "- To change an existing file, use its exact existing path; it will be rewritten in full.\n" +
@@ -157,7 +162,12 @@ export function parsePlan(text: string): ParsedPlan {
     if (!path || seen.has(path)) continue;
     seen.add(path);
     const title = firstString(t, TITLE_KEYS)?.trim() ?? `Write ${path}`;
-    tasks.push({ id: tasks.length + 1, title, targetArtifact: path, status: "pending" });
+    const usesRaw = [t.uses, t.dependsOn, t.depends_on, t.dependencies].find(Array.isArray) as unknown[] | undefined;
+    const uses = usesRaw
+      ?.filter((u): u is string => typeof u === "string")
+      .map((u) => safeArtifactPath(u))
+      .filter((u): u is string => Boolean(u) && u !== path);
+    tasks.push({ id: tasks.length + 1, title, targetArtifact: path, status: "pending", ...(uses?.length ? { uses } : {}) });
     if (tasks.length === MAX_TASKS) break;
   }
   if (tasks.length < MIN_ACCEPTED_TASKS) {
@@ -176,7 +186,15 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
   const { included, listed } = existingFilesForPlanner(ws);
   recordContext(
     ws,
-    { step: 0, kind: "plan", manifest: [...included, ...listed], files: included.map((p) => contextFile(ws, p)) },
+    {
+      step: 0,
+      kind: "plan",
+      manifest: [...included, ...listed],
+      files: [
+        ...included.map((p) => contextFile(ws, p)),
+        ...listed.map((p) => ({ ...contextFile(ws, p), mode: "outline" as const, tokens: estimateTokens(outlineFile(p, ws.artifacts[p])) })),
+      ],
+    },
     messages,
   );
   const { ready: targets, skipped } = splitBusy(allTargets);

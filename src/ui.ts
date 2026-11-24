@@ -1041,7 +1041,8 @@ export const UI_HTML = /* html */ `<!doctype html>
         for (const f of c.files || []) {
           const o = origins[f.path];
           const from = f.source === "previous" ? "earlier run" : (o ? "step " + o.step : "this run");
-          chip(f.path + " · ~" + short(f.tokens) + " tok · " + from, f.by || "", "file" + (f.source === "previous" ? " prev" : ""));
+          chip(f.path + (f.mode === "outline" ? " (outline)" : "") + " · ~" + short(f.tokens) + " tok · " + from,
+            (f.mode === "outline" ? "Only an outline was sent (names, ids, selectors) to save tokens. " : "") + (f.by || ""), "file" + (f.source === "previous" ? " prev" : ""));
         }
         if (c.targetExisted) chip("current " + c.target + " to rewrite", "", "file prev");
         return el("li", {},

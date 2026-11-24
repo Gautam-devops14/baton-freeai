@@ -10,6 +10,8 @@ export interface BatonTask {
   status: "pending" | "in_progress" | "completed" | "failed";
   assignedProvider?: string;
   assignedModel?: string;
+  /** Earlier files this file must match (from the plan). Only these are sent in full; the rest as outlines. */
+  uses?: string[];
 }
 
 export type LogEvent = "plan" | "execute" | "failover" | "complete";
@@ -120,6 +122,8 @@ export interface ContextFile {
   /** "provider/model" that wrote it, when known. */
   by?: string;
   tokens: number;
+  /** "full": whole file sent; "outline": only names/ids/selectors (to save tokens). */
+  mode?: "full" | "outline";
 }
 
 /** Exactly what one planning or build step was given: Baton's shared context, made visible. */
