@@ -294,5 +294,6 @@ test("the web UI's inline script is valid JavaScript (guards against template-li
   const { UI_HTML } = await import("../src/ui.js");
   const js = /<script>([\s\S]*)<\/script>/.exec(UI_HTML)![1];
   assert.doesNotThrow(() => new Script(js));
-  assert.ok(js.includes('.join("\\n")'), "newline escapes survive into the page as \\n, not raw line breaks");
+  // The page lives in a TS template literal, where backslash escapes get rewritten; the script avoids them entirely.
+  assert.ok(!js.includes(String.fromCharCode(92)), "no backslashes in the inline script");
 });

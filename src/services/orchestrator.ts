@@ -15,6 +15,7 @@ import type {
 } from "../types.js";
 import { gate } from "./gate.js";
 import { originsFromLogs } from "./context.js";
+import { CLIENT_RUN_ID_RE, progressEmitter } from "./progress.js";
 import { log, sumUsage } from "./logging.js";
 import { planWorkspace } from "./planner.js";
 import { runRelay } from "./relay.js";
@@ -104,6 +105,10 @@ export async function orchestrate(
     keys.openaiApiKey && "openai",
   ].filter((p): p is string => Boolean(p));
 
+  // Live progress for the browser (optional), and the chat thread this run belongs to.
+  const emit = req.clientRunId && CLIENT_RUN_ID_RE.test(req.clientRunId) ? progressEmitter(req.clientRunId) : undefined;
+  let chatId: string | undefined = req.chatId;
+
   /** Persist this prompt and its outcome. History must never break a run, so failures are swallowed. */
   const record = async (
     r: Pick<HistoryRecord, "id" | "status"> & Partial<HistoryRecord>,
@@ -119,6 +124,7 @@ export async function orchestrate(
         executionLogs: [],
         artifacts: {},
         ...r,
+        chatId: r.chatId ?? chatId ?? r.id,
       });
       return r.id;
     } catch {
@@ -131,12 +137,15 @@ export async function orchestrate(
   const gated = gate(req.userPrompt);
   if (gated) {
     const historyId = await record({ id: runId(), status: "gated", message: gated.response });
+    emit?.({ type: "done", status: "gated", historyId, message: gated.response });
     return { ...gated, historyId };
   }
 
   if (providers.length === 0) {
     const err = new MissingKeysError();
-    Object.assign(err, { historyId: await record({ id: runId(), status: "error", message: err.message }) });
+    const historyId = await record({ id: runId(), status: "error", message: err.message });
+    Object.assign(err, { historyId });
+    emit?.({ type: "done", status: "error", historyId, message: err.message });
     throw err;
   }
 
@@ -151,9 +160,12 @@ export async function orchestrate(
         : undefined;
     if (problem) {
       const err = new FollowUpError(problem);
-      Object.assign(err, { historyId: await record({ id: runId(), status: "error", message: problem, parentId: req.continueFrom }) });
+      const historyId = await record({ id: runId(), status: "error", message: problem, parentId: req.continueFrom });
+      Object.assign(err, { historyId });
+      emit?.({ type: "done", status: "error", historyId, message: problem });
       throw err;
     }
+    chatId = parent!.chatId ?? parent!.id; // a follow-up always lives in its parent's chat
   }
 
   const ws: BatonWorkspace = {
@@ -172,6 +184,10 @@ export async function orchestrate(
         }
       : {}),
   };
+  chatId ??= ws.workspaceId;
+  ws.chatId = chatId;
+  ws.emit = emit;
+  emit?.({ type: "start", runId: ws.workspaceId, chatId, followUpOf: parent?.id });
   const before = new Set(Object.keys(ws.artifacts));
   /** Fields every record of this run shares. */
   const runFields = () => ({
@@ -180,6 +196,8 @@ export async function orchestrate(
     contexts: ws.contexts,
     artifactOrigins: ws.artifactOrigins,
     plan: { metadata: ws.metadata, tasks: ws.tasks },
+    calls: ws.calls,
+    chatId: ws.chatId,
   });
 
   try {
@@ -225,6 +243,7 @@ export async function orchestrate(
       artifacts: ws.artifacts,
     });
 
+    emit?.({ type: "done", status, historyId });
     return {
       status,
       workspaceId: ws.workspaceId,
@@ -238,6 +257,8 @@ export async function orchestrate(
       changes,
       contexts: ws.contexts,
       artifactOrigins: ws.artifactOrigins,
+      chatId: ws.chatId,
+      calls: ws.calls,
       downloadUrl: `/api/download/${ws.workspaceId}`,
     };
   } catch (err) {
@@ -255,6 +276,7 @@ export async function orchestrate(
     if (err && typeof err === "object") {
       Object.assign(err, { historyId, executionLogs: ws.executionLogs } satisfies OrchestrationErrorInfo);
     }
+    emit?.({ type: "done", status: "error", historyId, message });
     throw err;
   }
 }

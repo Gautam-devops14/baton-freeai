@@ -7,7 +7,7 @@ import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../
 import { safeArtifactPath } from "./paths.js";
 import { splitBusy } from "../providers/memory.js";
 import { contextFile, recordContext } from "./context.js";
-import { log, logBusySkips, logModelSwaps } from "./logging.js";
+import { log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 
 /** We ask for 2-4 tasks (spec), but accept a 1-task plan rather than failing a small request. */
 export const MIN_TASKS = 2;
@@ -176,11 +176,13 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
         jsonMode: true,
         temperature: 0.1,
         retryOverloaded: i === targets.length - 1, // nobody left to hand off to: worth a short wait
+        ...traceFor(ws, 0),
       });
       logModelSwaps(ws, 0, target.provider, result.skippedModels);
       const plan = parsePlan(result.content);
       ws.metadata = { ...ws.metadata, ...plan.metadata };
       ws.tasks = plan.tasks;
+      ws.emit?.({ type: "plan", tasks: plan.tasks.map((t) => ({ id: t.id, targetArtifact: t.targetArtifact, title: t.title })) });
       log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestone${plan.tasks.length === 1 ? "" : "s"}`, result.usage);
       return;
     } catch (err) {

@@ -97,6 +97,36 @@ export function splitBusy(targets: ProviderTarget[]): {
   return ready.length ? { ready, skipped } : { ready: targets, skipped: [] };
 }
 
+/** What Baton currently remembers, for the debug panel. Accounts show provider + a short key hash only. */
+export function snapshotMemory() {
+  const t = now();
+  const split = (k: string) => {
+    const [provider, baseUrl, keyHash, ...rest] = k.split("|");
+    return { provider, host: (() => { try { return new URL(baseUrl).host; } catch { return baseUrl; } })(), keyHash, rest: rest.join("|") };
+  };
+  return {
+    retiredModels: [...deadModels].filter(([, exp]) => exp > t).map(([k, exp]) => {
+      const a = split(k);
+      return { provider: a.provider, host: a.host, keyHash: a.keyHash, model: a.rest, until: new Date(exp).toISOString() };
+    }),
+    discoveredModels: [...discovered].filter(([, d]) => d.expiresAt > t).map(([k, d]) => {
+      const a = split(k);
+      return { provider: a.provider, host: a.host, keyHash: a.keyHash, model: d.model, until: new Date(d.expiresAt).toISOString() };
+    }),
+    busyProviders: [...busyUntil].filter(([, u]) => u > t).map(([k, u]) => {
+      const a = split(k);
+      return { provider: a.provider, host: a.host, keyHash: a.keyHash, until: new Date(u).toISOString() };
+    }),
+  };
+}
+
+/** Debug panel: forget everything Baton learned about providers. */
+export function forgetProviderMemory(): void {
+  deadModels.clear();
+  discovered.clear();
+  busyUntil.clear();
+}
+
 /** Tests only: forget everything, optionally with a fake clock. */
 export function resetProviderMemory(clock?: () => number): void {
   deadModels.clear();

@@ -40,6 +40,24 @@ export interface RunUsage {
   byModel: ModelUsage[];
 }
 
+/** One HTTP call to a provider (debug view). "start" is emitted live; "end" is stored. */
+export interface CallTrace {
+  phase: "start" | "end";
+  at: string;
+  provider: string;
+  model: string;
+  host: string;
+  /** Run and step that made the call, when known. */
+  runId?: string;
+  step?: number;
+  status?: number;
+  /** "ok", or the error kind (rate_limit, overloaded, model_unavailable, timeout...). */
+  outcome?: string;
+  latencyMs?: number;
+  tokens?: TokenUsage;
+  detail?: string;
+}
+
 export interface ExecutionLog {
   step: number;
   event: LogEvent;
@@ -103,6 +121,12 @@ export interface BatonWorkspace {
   artifactOrigins?: Record<string, ArtifactOrigin>;
   /** What each step was given (filled by planner and relay). */
   contexts?: StepContext[];
+  /** Every provider call made for this run (debug view). */
+  calls?: CallTrace[];
+  /** Chat (conversation thread) this run belongs to. */
+  chatId?: string;
+  /** Live progress sink (not persisted). */
+  emit?: (event: ProgressEvent) => void;
   metadata: {
     primaryLanguage?: string;
     framework?: string;
@@ -123,12 +147,24 @@ export interface ProviderKeys {
   nvidiaApiKey?: string;
 }
 
+/** Live progress events streamed to the browser while a run is in flight. */
+export type ProgressEvent =
+  | { type: "start"; runId: string; chatId?: string; followUpOf?: string }
+  | { type: "log"; entry: ExecutionLog }
+  | { type: "call"; call: CallTrace }
+  | { type: "plan"; tasks: Array<{ id: number; targetArtifact: string; title: string }> }
+  | { type: "done"; status: string; historyId?: string; message?: string };
+
 export interface OrchestrateRequest {
   userPrompt: string;
   taskType?: TaskType;
   keys: ProviderKeys;
   /** History id of a previous run: change that project instead of starting a new one. */
   continueFrom?: string;
+  /** Chat thread to file this run under (UI). Follow-ups inherit their parent's chat. */
+  chatId?: string;
+  /** Random id chosen by the browser so it can subscribe to live progress before the run starts. */
+  clientRunId?: string;
 }
 
 export interface OrchestrateResponse {
@@ -142,6 +178,8 @@ export interface OrchestrateResponse {
   changes?: { modified: string[]; added: string[] };
   contexts?: StepContext[];
   artifactOrigins?: Record<string, ArtifactOrigin>;
+  chatId?: string;
+  calls?: CallTrace[];
   taskType: TaskType;
   summary: {
     totalTasks: number;

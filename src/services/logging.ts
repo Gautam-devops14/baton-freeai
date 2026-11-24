@@ -1,5 +1,5 @@
 import type { SkippedModel } from "../providers/client.js";
-import type { BatonWorkspace, ExecutionLog, LogEvent, ModelUsage, ProviderTarget, RunUsage, TokenUsage, UsageTotals } from "../types.js";
+import type { BatonWorkspace, CallTrace, ExecutionLog, LogEvent, ModelUsage, ProviderTarget, RunUsage, TokenUsage, UsageTotals } from "../types.js";
 
 export function log(
   ws: BatonWorkspace,
@@ -9,7 +9,7 @@ export function log(
   message: string,
   tokens?: TokenUsage,
 ): void {
-  ws.executionLogs.push({
+  const entry = {
     step,
     event,
     provider: target.provider,
@@ -17,7 +17,20 @@ export function log(
     message,
     timestamp: new Date().toISOString(),
     ...(tokens ? { tokens } : {}),
-  });
+  };
+  ws.executionLogs.push(entry);
+  ws.emit?.({ type: "log", entry });
+}
+
+/** Trace options for provider calls made on behalf of one step: stored on the run and streamed live. */
+export function traceFor(ws: BatonWorkspace, step: number) {
+  return {
+    traceMeta: { runId: ws.workspaceId, step },
+    onTrace: (call: CallTrace) => {
+      if (call.phase === "end") (ws.calls ??= []).push(call);
+      ws.emit?.({ type: "call", call });
+    },
+  };
 }
 
 const zero = (): UsageTotals => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 0 });

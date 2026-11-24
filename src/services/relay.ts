@@ -5,7 +5,7 @@
 import { chatCompletion, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
 import { splitBusy } from "../providers/memory.js";
-import { log, logBusySkips, logModelSwaps } from "./logging.js";
+import { log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 import { extractArtifactBody } from "./sanitize.js";
 import { contextFile, originLabel, recordContext } from "./context.js";
 
@@ -122,6 +122,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
       try {
         const result = await chatCompletion(target, messages, {
           retryOverloaded: i === candidates.length - 1, // last resort: a short wait beats failing the task
+          ...traceFor(ws, task.id),
         });
         logModelSwaps(ws, task.id, target.provider, result.skippedModels);
         ws.artifacts[task.targetArtifact] = extractArtifactBody(result.content, task.targetArtifact);

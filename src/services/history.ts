@@ -4,7 +4,7 @@
 
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ArtifactOrigin, BatonTask, BatonWorkspace, ExecutionLog, OrchestrateResponse, RunUsage, StepContext, TaskType } from "../types.js";
+import type { ArtifactOrigin, BatonTask, CallTrace, BatonWorkspace, ExecutionLog, OrchestrateResponse, RunUsage, StepContext, TaskType } from "../types.js";
 import { sumUsage } from "./logging.js";
 
 export type RunStatus = OrchestrateResponse["status"] | "gated" | "error";
@@ -34,11 +34,15 @@ export interface HistoryRecord {
   /** What each step was given, and who wrote each file. */
   contexts?: StepContext[];
   artifactOrigins?: Record<string, ArtifactOrigin>;
+  /** Chat thread (root run id); older records fall back to their parent chain. */
+  chatId?: string;
+  /** Every provider call this run made (debug view). */
+  calls?: CallTrace[];
   executionLogs: ExecutionLog[];
   artifacts: Record<string, string>;
 }
 
-export type HistorySummary = Omit<HistoryRecord, "executionLogs" | "artifacts" | "contexts" | "plan" | "artifactOrigins"> & {
+export type HistorySummary = Omit<HistoryRecord, "executionLogs" | "artifacts" | "contexts" | "plan" | "artifactOrigins" | "calls"> & {
   artifactCount: number;
   logCount: number;
 };
@@ -65,7 +69,7 @@ export function withUsage(r: HistoryRecord): HistoryRecord {
 }
 
 export function summarize(record: HistoryRecord): HistorySummary {
-  const { executionLogs, artifacts, contexts: _c, plan: _p, artifactOrigins: _o, ...rest } = withUsage(record);
+  const { executionLogs, artifacts, contexts: _c, plan: _p, artifactOrigins: _o, calls: _k, ...rest } = withUsage(record);
   return { ...rest, artifactCount: Object.keys(artifacts).length, logCount: executionLogs.length };
 }
 

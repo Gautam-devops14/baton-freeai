@@ -1,8 +1,9 @@
 // Unified OpenAI-compatible chat client (spec §5, guardrails 1 & 3).
 // One fetch helper for every provider; no vendor SDKs.
 
-import type { ChatMessage, ProviderTarget, TokenUsage } from "../types.js";
+import type { CallTrace, ChatMessage, ProviderTarget, TokenUsage } from "../types.js";
 import { listModels, rankModels } from "./discovery.js";
+import { rememberCall } from "./trace.js";
 import {
   clearProviderBusy,
   getDiscoveredModel,
@@ -86,6 +87,10 @@ export interface ChatOptions {
    * waterfall: with another provider available, switching beats waiting.
    */
   retryOverloaded?: boolean;
+  /** Called for every provider HTTP call (start and end) — for live progress and the debug view. */
+  onTrace?: (t: CallTrace) => void;
+  /** Run/step the calls belong to, copied into each trace. */
+  traceMeta?: { runId?: string; step?: number };
 }
 
 /** Read at call time so it can be tuned (or zeroed in tests) without a restart. */
@@ -269,7 +274,44 @@ export async function chatCompletion(
   );
 }
 
+/** One traced provider call: emits start/end events with status, latency and tokens. */
 async function requestOnce(
+  target: ProviderTarget,
+  model: string,
+  messages: ChatMessage[],
+  opts: ChatOptions,
+): Promise<{ content: string; usage: TokenUsage }> {
+  const base = {
+    provider: target.provider,
+    model,
+    host: (() => {
+      try {
+        return new URL(target.baseUrl).host;
+      } catch {
+        return target.baseUrl;
+      }
+    })(),
+    ...opts.traceMeta,
+  };
+  const t0 = Date.now();
+  opts.onTrace?.({ phase: "start", at: new Date(t0).toISOString(), ...base });
+  const finish = (extra: Partial<CallTrace>) => {
+    const t: CallTrace = { phase: "end", at: new Date().toISOString(), latencyMs: Date.now() - t0, ...base, ...extra };
+    rememberCall(t);
+    opts.onTrace?.(t);
+  };
+  try {
+    const result = await requestUntraced(target, model, messages, opts);
+    finish({ status: 200, outcome: "ok", tokens: result.usage });
+    return result;
+  } catch (err) {
+    const pe = err instanceof ProviderError ? err : undefined;
+    finish({ status: pe?.status, outcome: pe?.kind ?? "error", detail: pe ? pe.reason : String((err as Error)?.message ?? err) });
+    throw err;
+  }
+}
+
+async function requestUntraced(
   target: ProviderTarget,
   model: string,
   messages: ChatMessage[],

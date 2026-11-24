@@ -1,5 +1,10 @@
-// Minimal browser UI served at GET /. Single self-contained page, no build step.
-// Keys stay in the browser (localStorage, opt-in) and are sent only to this server.
+// Browser UI served at GET /. A self-contained chat-style app (no build step):
+// sidebar of chats, message thread with live progress, composer, settings
+// dialog for API keys, and a debug drawer showing what the backend did.
+//
+// NOTE: this page lives inside a TypeScript template literal. Never use
+// backticks, dollar-brace sequences or backslash escapes in it; the client
+// script uses NL (String.fromCharCode(10)) for newlines instead.
 
 export const UI_HTML = /* html */ `<!doctype html>
 <html lang="en">
@@ -9,258 +14,273 @@ export const UI_HTML = /* html */ `<!doctype html>
 <title>Baton</title>
 <style>
   :root {
-    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
-    --accent: #3b5bdb; --ok: #2b8a3e; --warn: #c2410c; --code: #f1f1ee;
+    --bg: #ffffff; --side: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e6e6e1;
+    --accent: #3b5bdb; --accent-soft: #edf1ff; --ok: #2b8a3e; --warn: #c2410c; --code: #f3f3f0; --bubble: #f1f1ee;
+    --shadow: 0 2px 10px rgba(0,0,0,.06);
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #151515; --panel: #1e1e1e; --text: #ececea; --muted: #9a9a94; --line: #2e2e2c;
-      --accent: #7b93ff; --ok: #5cc06e; --warn: #f08a4b; --code: #262626; }
+    :root { --bg: #171717; --side: #1f1f1f; --panel: #1f1f1f; --text: #ececea; --muted: #9a9a94; --line: #2f2f2d;
+      --accent: #7b93ff; --accent-soft: #232a45; --ok: #5cc06e; --warn: #f08a4b; --code: #262626; --bubble: #2a2a2a;
+      --shadow: 0 2px 12px rgba(0,0,0,.4); }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 920px; margin: 0 auto; padding: 32px 16px 64px; }
-  h1 { margin: 0 0 4px; font-size: 26px; }
-  .sub { color: var(--muted); margin: 0 0 24px; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
-  label { display: block; font-weight: 600; font-size: 13px; margin: 0 0 6px; }
-  .opt { font-weight: 400; color: var(--muted); }
-  textarea, input, select { width: 100%; font: inherit; color: var(--text); background: var(--bg);
-    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
-  textarea { min-height: 96px; resize: vertical; }
-  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 14px; }
-  .check { display: flex; gap: 8px; align-items: center; font-weight: 400; margin-top: 12px; color: var(--muted); }
-  .check input { width: auto; }
-  button { margin-top: 18px; background: var(--accent); color: #fff; border: 0; border-radius: 8px;
-    padding: 11px 20px; font: inherit; font-weight: 600; cursor: pointer; }
-  button:disabled { opacity: .55; cursor: wait; }
-  .status { margin-top: 14px; color: var(--muted); min-height: 1.5em; }
-  .status.err { color: var(--warn); }
-  h2 { font-size: 17px; margin: 0 0 12px; }
-  .summary { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-  .pill { border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; font-size: 13px; }
-  .pill.success { color: var(--ok); border-color: var(--ok); }
-  .pill.partial, .pill.failed { color: var(--warn); border-color: var(--warn); }
-  a.dl { color: var(--accent); font-weight: 600; }
-  ol.logs { margin: 0; padding-left: 20px; }
-  ol.logs li { margin: 4px 0; }
-  .ev { font-family: ui-monospace, Menlo, monospace; font-size: 12px; padding: 1px 6px; border-radius: 4px; background: var(--code); }
-  .ev.failover { color: var(--warn); }
-  .ev.execute, .ev.complete { color: var(--ok); }
-  .meta { color: var(--muted); font-size: 13px; }
-  details { border-top: 1px solid var(--line); padding: 10px 0; }
-  details:first-of-type { border-top: 0; }
-  summary { cursor: pointer; font-family: ui-monospace, Menlo, monospace; font-size: 14px; }
-  pre { background: var(--code); border-radius: 8px; padding: 12px; overflow-x: auto; font-size: 13px; margin: 10px 0 0; }
-  /* ---- layout with history sidebar ---- */
-  main { max-width: 1200px; }
-  .layout { display: grid; gap: 20px; grid-template-columns: 1fr; grid-template-areas: "content" "history"; }
-  .content { grid-area: content; min-width: 0; }
-  .history { grid-area: history; min-width: 0; }
-  @media (min-width: 960px) {
-    .layout { grid-template-columns: 300px minmax(0, 1fr); grid-template-areas: "history content"; align-items: start; }
-    .history { position: sticky; top: 16px; max-height: calc(100vh - 32px); display: flex; flex-direction: column; }
-    .history .runs { overflow-y: auto; }
-  }
-  .history .head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
-  .history h2 { margin: 0; }
-  .linkbtn { background: none; border: 0; color: var(--muted); font: inherit; font-size: 13px; padding: 0; margin: 0; cursor: pointer; text-decoration: underline; }
-  .linkbtn:hover { color: var(--warn); }
-  .runs { list-style: none; margin: 0; padding: 0; }
-  .run { width: 100%; text-align: left; background: none; color: var(--text); border: 1px solid transparent; border-radius: 8px;
-    padding: 9px 10px; margin: 0 0 4px; font: inherit; font-weight: 400; cursor: pointer; display: block; }
-  .run:hover { background: var(--bg); }
-  .run.active { border-color: var(--accent); background: var(--bg); }
-  .run .p { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 14px; overflow-wrap: anywhere; }
-  .run .m { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 3px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-  .dot.success { background: var(--ok); }
-  .dot.partial, .dot.failed, .dot.error { background: var(--warn); }
-  .empty { color: var(--muted); font-size: 14px; }
-  .pill.error { color: var(--warn); border-color: var(--warn); }
-  .prompt-view { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; }
-  .errbox { color: var(--warn); border: 1px solid var(--warn); border-radius: 8px; padding: 10px 12px; margin-top: 12px; overflow-wrap: anywhere; }
-  .actions { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; }
-  .actions .linkbtn { color: var(--accent); }
-  .actions .linkbtn.danger { color: var(--muted); }
-  .keys { grid-template-columns: 1fr; }
-  @media (min-width: 600px) { .keys { grid-template-columns: 1fr 1fr; } }
-  .tokens { display: flex; flex-wrap: wrap; flex-direction: row; gap: 6px 14px; align-items: baseline; margin-top: 12px; font-size: 14px; }
-  .tokens strong { font-variant-numeric: tabular-nums; }
-  .tokens .by { color: var(--muted); font-size: 13px; }
-  .tok { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-  .alltime { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
-  .utable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
-  .utable th, .utable td { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; vertical-align: top; }
-  .utable th { color: var(--muted); font-weight: 600; font-size: 12px; }
-  .utable th:first-child, .utable td:first-child { text-align: left; overflow-wrap: anywhere; }
-  .utable td .prov { display: block; color: var(--muted); font-size: 11px; }
-  .utable tfoot td { font-weight: 600; border-bottom: 0; }
-  .usage { border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 12px; }
-  .usage .head { margin-bottom: 4px; }
-  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-  .seg button { margin: 0; border: 0; border-radius: 0; background: none; color: var(--muted); font-size: 12px; font-weight: 600; padding: 3px 9px; }
-  .seg button.on { background: var(--accent); color: #fff; }
-  .usage .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
-  .usage .utable { font-size: 12px; }
-  .usage .utable th, .usage .utable td { padding: 4px 3px; }
-  .followup { border: 1px solid var(--accent); background: var(--bg); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 14px; }
-  .followup .fu-help { color: var(--muted); font-size: 13px; margin-top: 2px; }
-  .followup .linkbtn { margin-top: 6px; }
-  .chain { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
-  .chain ol { margin: 4px 0 0; padding-left: 20px; }
-  .chain .changes { margin-top: 6px; color: var(--text); }
-  .actions .linkbtn.primary { font-weight: 600; }
-  .ctx-intro { color: var(--muted); font-size: 14px; margin: -4px 0 14px; }
-  ol.ctx { list-style: none; margin: 0; padding: 0 0 0 18px; border-left: 2px solid var(--line); }
-  ol.ctx > li { position: relative; margin: 0 0 16px; }
-  ol.ctx > li::before { content: ""; position: absolute; left: -25px; top: 5px; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); }
-  .ctx h3 { font-size: 15px; margin: 0 0 4px; overflow-wrap: anywhere; }
-  .ctx h3 .meta { font-weight: 400; }
-  .ctx .sent { font-size: 13px; margin: 2px 0 6px; overflow-wrap: anywhere; }
-  .ctx .sent .ok { color: var(--ok); }
-  .ctx .sent .bad { color: var(--warn); }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
-  .chip { font-size: 12px; border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 2px 9px; overflow-wrap: anywhere; }
-  .chip.file { border-color: var(--accent); }
-  .chip.prev { border-style: dashed; }
-  .chip .from { color: var(--muted); }
-  .ctx details summary { font-family: inherit; font-size: 13px; color: var(--accent); }
-  .ctx details pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  input, select, textarea { font: inherit; color: var(--text); }
   [hidden] { display: none !important; }
+
+  .app { display: grid; grid-template-columns: 272px minmax(0, 1fr) auto; height: 100vh; height: 100dvh; }
+
+  /* ---------- sidebar ---------- */
+  .side { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 14px 14px 8px; font-weight: 700; font-size: 17px; }
+  .brand .logo { width: 26px; height: 26px; border-radius: 8px; background: var(--accent); color: #fff; display: grid; place-items: center; font-size: 14px; }
+  .newchat { margin: 6px 12px 10px; padding: 9px 12px; border: 1px solid var(--line); background: var(--panel); border-radius: 10px;
+    text-align: left; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+  .newchat:hover { border-color: var(--accent); }
+  .chats { flex: 1; overflow-y: auto; padding: 0 8px; min-height: 0; }
+  .chats h3 { font-size: 12px; color: var(--muted); font-weight: 600; margin: 12px 8px 4px; }
+  .chat-item { position: relative; display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 8px; padding: 8px 30px 8px 10px; margin: 1px 0; }
+  .chat-item:hover { background: var(--bubble); }
+  .chat-item.active { background: var(--accent-soft); }
+  .chat-item .t { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+  .chat-item .m { display: block; font-size: 12px; color: var(--muted); }
+  .chat-item .del { position: absolute; right: 6px; top: 8px; border: 0; background: none; color: var(--muted); padding: 2px 6px; border-radius: 6px; opacity: 0; }
+  .chat-item:hover .del, .chat-item.active .del { opacity: 1; }
+  .chat-item .del:hover { color: var(--warn); background: var(--panel); }
+  .side-empty { color: var(--muted); font-size: 13px; padding: 8px 10px; }
+  .side-foot { border-top: 1px solid var(--line); padding: 8px; display: grid; gap: 4px; }
+  .side-btn { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; background: none; border: 0; border-radius: 8px; padding: 8px 10px; text-align: left; font-size: 14px; }
+  .side-btn:hover { background: var(--bubble); }
+  .side-btn .sub { color: var(--muted); font-size: 12px; }
+  summary.side-btn { list-style: none; cursor: pointer; }
+  summary.side-btn::-webkit-details-marker { display: none; }
+  .usage-box { padding: 4px 10px 8px; font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-bottom: 6px; }
+  .seg button { border: 0; background: none; color: var(--muted); font-size: 12px; font-weight: 600; padding: 2px 8px; }
+  .seg button.on { background: var(--accent); color: #fff; }
+
+  /* ---------- main ---------- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); min-height: 52px; }
+  .topbar .title { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .icon-btn { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 5px 10px; font-size: 13px; white-space: nowrap; color: var(--text); text-decoration: none; }
+  .icon-btn:hover, .icon-btn.on { border-color: var(--accent); color: var(--accent); }
+  .menu-btn { display: none; }
+  .thread { flex: 1; overflow-y: auto; min-height: 0; }
+  .thread-inner { max-width: 820px; margin: 0 auto; padding: 24px 16px 12px; }
+
+  .welcome { text-align: center; padding: 8vh 0 0; }
+  .welcome h1 { font-size: 26px; margin: 0 0 6px; }
+  .welcome p { color: var(--muted); margin: 0 auto 22px; max-width: 560px; }
+  .suggest { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; text-align: left; }
+  .suggest button { border: 1px solid var(--line); background: var(--panel); border-radius: 12px; padding: 12px 14px; text-align: left; }
+  .suggest button:hover { border-color: var(--accent); }
+  .suggest b { display: block; font-size: 14px; }
+  .suggest span { color: var(--muted); font-size: 13px; }
+
+  .msg { display: flex; gap: 12px; margin: 0 0 22px; }
+  .msg.user { justify-content: flex-end; }
+  .bubble { background: var(--bubble); padding: 10px 14px; border-radius: 18px; max-width: 80%; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 13px; flex: none; margin-top: 2px; }
+  .bot { flex: 1; min-width: 0; }
+  .bot .line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .pill { border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; font-size: 12px; font-weight: 600; }
+  .pill.success { color: var(--ok); border-color: var(--ok); }
+  .pill.partial, .pill.failed, .pill.error { color: var(--warn); border-color: var(--warn); }
+  .pill.running { color: var(--accent); border-color: var(--accent); }
+  .bot .text { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .errbox { color: var(--warn); border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; margin-top: 8px; overflow-wrap: anywhere; font-size: 14px; }
+  .files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .filechip { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 4px 10px; font-size: 13px; font-family: ui-monospace, Menlo, monospace; overflow-wrap: anywhere; text-align: left; }
+  .filechip:hover { border-color: var(--accent); }
+  .filechip.changed { border-color: var(--accent); }
+  .filechip .tag { font-family: -apple-system, sans-serif; font-size: 11px; color: var(--accent); margin-left: 6px; }
+  .mmeta { color: var(--muted); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
+  .mactions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 6px; }
+  .linkbtn { background: none; border: 0; padding: 0; color: var(--accent); font-size: 13px; text-decoration: none; }
+  .linkbtn:hover { text-decoration: underline; }
+  .linkbtn.muted { color: var(--muted); }
+
+  .progress { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; }
+  .progress li { display: flex; gap: 8px; padding: 2px 0; overflow-wrap: anywhere; }
+  .progress .ic { width: 16px; flex: none; text-align: center; }
+  .progress .ok { color: var(--ok); }
+  .progress .bad { color: var(--warn); }
+  .progress .wait { color: var(--accent); }
+  .progress .dim { color: var(--muted); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; }
+
+  /* ---------- composer ---------- */
+  .composer-wrap { padding: 6px 16px 14px; }
+  .composer { max-width: 820px; margin: 0 auto; border: 1px solid var(--line); background: var(--panel); border-radius: 16px; padding: 10px 12px 8px; box-shadow: var(--shadow); }
+  .composer:focus-within { border-color: var(--accent); }
+  .composer textarea { width: 100%; border: 0; outline: none; resize: none; background: transparent; min-height: 26px; max-height: 220px; line-height: 1.5; }
+  .composer .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .composer select { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 3px 6px; font-size: 13px; }
+  .composer .hint { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .composer .hint.cont { color: var(--accent); }
+  .send { border: 0; background: var(--accent); color: #fff; border-radius: 10px; padding: 6px 14px; font-weight: 600; }
+  .send:disabled { opacity: .5; cursor: default; }
+  .keywarn { max-width: 820px; margin: 0 auto 6px; font-size: 13px; color: var(--warn); }
+
+  /* ---------- debug drawer ---------- */
+  .debug { width: 460px; border-left: 1px solid var(--line); background: var(--side); display: flex; flex-direction: column; min-height: 0; }
+  .debug-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .debug-head .tabs { flex: 1; display: flex; gap: 4px; }
+  .debug-head .tabs button { border: 0; background: none; border-radius: 6px; padding: 4px 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
+  .debug-head .tabs button.on { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+  .debug-body { flex: 1; overflow-y: auto; padding: 12px; min-height: 0; font-size: 13px; }
+  .dsec { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+  .dsec h4 { margin: 0 0 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .dsec h4 .sub { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 0; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .tablewrap { overflow-x: auto; }
+  .dtable { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .dtable th, .dtable td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; white-space: nowrap; }
+  .dtable td.wrap { white-space: normal; overflow-wrap: anywhere; min-width: 140px; }
+  .dtable th { color: var(--muted); font-weight: 600; }
+  .dtable td.num, .dtable th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .s-ok { color: var(--ok); } .s-bad { color: var(--warn); }
+  .dlog { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .dlog li { padding: 2px 0; border-bottom: 1px dashed var(--line); overflow-wrap: anywhere; }
+  .dlog .ev { font-weight: 700; }
+  .dlog .ev.failover { color: var(--warn); } .dlog .ev.execute, .dlog .ev.plan { color: var(--ok); }
+  pre.raw { background: var(--code); border-radius: 8px; padding: 10px; font-size: 11px; overflow: auto; max-height: 420px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; }
+  .ctx { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); }
+  .ctx > li { position: relative; margin: 0 0 12px; }
+  .ctx > li::before { content: ""; position: absolute; left: -20px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+  .ctx h5 { margin: 0 0 2px; font-size: 13px; overflow-wrap: anywhere; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+  .chip { font-size: 11px; border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 1px 8px; overflow-wrap: anywhere; }
+  .chip.file { border-color: var(--accent); } .chip.prev { border-style: dashed; }
+  .muted { color: var(--muted); }
+  .dbtn { border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+  .dbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .live li { font-size: 11px; }
+
+  /* ---------- dialogs ---------- */
+  dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); padding: 0; width: min(560px, calc(100vw - 32px)); box-shadow: var(--shadow); }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  .dlg-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .dlg-head h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+  .dlg-body { padding: 14px 16px; max-height: 70vh; overflow-y: auto; }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+  .field { margin-bottom: 12px; }
+  .field label { display: flex; justify-content: space-between; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .field label a { font-weight: 400; color: var(--accent); font-size: 12px; }
+  .field input { width: 100%; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+  .check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
+  .btn { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 6px 14px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  #fileDlg { width: min(900px, calc(100vw - 32px)); }
+  #fileDlg pre { margin: 0; background: var(--code); border-radius: 8px; padding: 12px; font-size: 12px; overflow: auto; max-height: 65vh; white-space: pre; }
+
+  /* ---------- responsive ---------- */
+  .scrim { display: none; }
+  @media (max-width: 1180px) {
+    .debug { position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw); z-index: 30; box-shadow: var(--shadow); }
+  }
+  @media (max-width: 860px) {
+    .app { grid-template-columns: minmax(0, 1fr); }
+    .side { position: fixed; top: 0; left: 0; bottom: 0; width: 280px; z-index: 40; transform: translateX(-100%); transition: transform .2s; }
+    .side.open { transform: none; box-shadow: var(--shadow); }
+    .scrim.show { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.3); z-index: 35; }
+    .menu-btn { display: inline-block; }
+    .bubble { max-width: 90%; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>Baton</h1>
-  <p class="sub">Describe a project. Baton plans it, builds each file on Groq, and fails over to Gemini, NVIDIA NIM and then OpenAI (for whichever keys you add) when a provider hits its limit.</p>
-
-  <div class="layout">
-  <aside class="panel history" aria-label="Token usage and run history">
-    <section class="usage" id="usage" hidden aria-label="Token usage by model">
-      <div class="head">
-        <h2>Token usage</h2>
-        <span class="seg" role="group" aria-label="Period">
-          <button type="button" id="uToday" class="on" aria-pressed="true">Today</button>
-          <button type="button" id="uAll" aria-pressed="false">All time</button>
-        </span>
-      </div>
-      <div id="usageBody"></div>
-    </section>
-    <div class="head">
-      <h2>History</h2>
-      <button type="button" class="linkbtn" id="clearAll" hidden>Clear all</button>
+<div class="app">
+  <aside class="side" id="side" aria-label="Chats">
+    <div class="brand"><span class="logo">B</span> Baton</div>
+    <button type="button" class="newchat" id="newChat">+ New chat</button>
+    <nav class="chats" id="chats"></nav>
+    <div class="side-foot">
+      <details id="usageDetails">
+        <summary class="side-btn"><span>Token usage</span><span class="sub" id="usageSummary"></span></summary>
+        <div class="usage-box">
+          <span class="seg"><button type="button" id="uToday" class="on">Today</button><button type="button" id="uAll">All time</button></span>
+          <div id="usageBody"></div>
+        </div>
+      </details>
+      <button type="button" class="side-btn" id="openSettings"><span>Settings &amp; API keys</span><span class="sub" id="keyStatus"></span></button>
+      <button type="button" class="side-btn" id="openDebugSide"><span>Debug panel</span><span class="sub" id="debugState">off</span></button>
     </div>
-    <p class="empty" id="historyEmpty">No runs yet. Every prompt you send, with its log and files, will be saved here.</p>
-    <ul class="runs" id="runs"></ul>
   </aside>
+  <div class="scrim" id="scrim"></div>
 
-  <div class="content">
-  <form class="panel" id="form">
-    <div class="followup" id="followup" hidden>
-      <div><strong>Follow-up</strong> to: <span id="fuPrompt"></span> <span class="meta" id="fuFiles"></span></div>
-      <div class="fu-help">Your prompt will change this project. Every model gets its earlier requests and current files as context.</div>
-      <button type="button" class="linkbtn" id="fuCancel">Start a new project instead</button>
+  <main class="main">
+    <header class="topbar">
+      <button type="button" class="icon-btn menu-btn" id="menuBtn" aria-label="Open chats">Menu</button>
+      <div class="title" id="chatTitle">New chat</div>
+      <a class="icon-btn" id="downloadLatest" hidden>Download project</a>
+      <button type="button" class="icon-btn" id="debugBtn" aria-pressed="false">Debug</button>
+    </header>
+    <div class="thread" id="thread"><div class="thread-inner" id="threadInner"></div></div>
+    <div class="composer-wrap">
+      <div class="keywarn" id="keyWarn" hidden>No API keys yet. <button type="button" class="linkbtn" id="keyWarnBtn">Add them in Settings</button> (greetings still work without keys).</div>
+      <form class="composer" id="composer">
+        <textarea id="prompt" rows="1" placeholder="Describe what Baton should build..." aria-label="Message"></textarea>
+        <div class="row">
+          <select id="taskType" aria-label="Task type">
+            <option value="code">Code</option>
+            <option value="document">Document</option>
+            <option value="analysis">Analysis</option>
+          </select>
+          <span class="hint" id="composerHint">New project</span>
+          <button type="submit" class="send" id="send">Send</button>
+        </div>
+      </form>
     </div>
-    <label for="prompt" id="promptLabel">What should Baton build?</label>
-    <textarea id="prompt" required placeholder="Create an Express.js authentication service with JWT and bcrypt"></textarea>
+  </main>
 
-    <div class="row">
-      <div>
-        <label for="taskType">Task type</label>
-        <select id="taskType">
-          <option value="code">Code</option>
-          <option value="document">Document</option>
-          <option value="analysis">Analysis</option>
-        </select>
-      </div>
+  <aside class="debug" id="debug" hidden aria-label="Debug panel">
+    <div class="debug-head">
+      <div class="tabs"><button type="button" id="tabRun" class="on">This run</button><button type="button" id="tabServer">Server</button></div>
+      <button type="button" class="icon-btn" id="closeDebug">Close</button>
     </div>
+    <div class="debug-body" id="debugBody"></div>
+  </aside>
+</div>
 
-    <div class="row keys">
-      <div>
-        <label for="groq">Groq API key</label>
-        <input id="groq" type="password" autocomplete="off" placeholder="gsk_..." />
-      </div>
-      <div>
-        <label for="gemini">Gemini API key</label>
-        <input id="gemini" type="password" autocomplete="off" placeholder="AIza..." />
-      </div>
-      <div>
-        <label for="nvidia">NVIDIA NIM API key</label>
-        <input id="nvidia" type="password" autocomplete="off" placeholder="nvapi-..." />
-      </div>
-      <div>
-        <label for="openai">OpenAI API key <span class="opt">(optional, paid)</span></label>
-        <input id="openai" type="password" autocomplete="off" placeholder="sk-..." />
-      </div>
-    </div>
+<dialog id="settingsDlg">
+  <div class="dlg-head"><h2>Settings &amp; API keys</h2><button type="button" class="icon-btn" id="closeSettings">Close</button></div>
+  <div class="dlg-body">
+    <p class="muted" style="margin-top:0;font-size:13px">Keys go only to your Baton server, which passes them to each provider. They are never saved in history. Order Baton tries providers in: <span id="orderText">...</span></p>
+    <div id="keyFields"></div>
     <label class="check"><input type="checkbox" id="remember" /> Remember keys in this browser</label>
-
-    <button type="submit" id="go">Run</button>
-    <div class="status" id="status" role="status"></div>
-  </form>
-
-  <section class="panel" id="results" hidden>
-    <h2>Result</h2>
-    <p class="meta" id="runMeta"></p>
-    <div class="chain" id="runChain" hidden></div>
-    <div class="prompt-view" id="runPrompt"></div>
-    <div class="summary" id="summary"></div>
-    <div class="tokens" id="runTokens" hidden></div>
-    <div class="errbox" id="runError" hidden></div>
-    <div class="actions">
-      <button type="button" class="linkbtn primary" id="continue">Continue this project</button>
-      <button type="button" class="linkbtn" id="reuse">Use this prompt again</button>
-      <button type="button" class="linkbtn danger" id="deleteRun">Delete from history</button>
-    </div>
-  </section>
-
-  <section class="panel" id="ctxPanel" hidden>
-    <h2>How context was shared</h2>
-    <p class="ctx-intro">Baton never relies on a model's own chat memory. Each step gets the same shared workspace: the goal, the plan's decisions, the file list and the full text of every file written so far. That's why any model can pick up where another stopped, and why the same context is simply re-sent when a provider fails.</p>
-    <ol class="ctx" id="ctx"></ol>
-  </section>
-
-  <section class="panel" id="logPanel" hidden>
-    <h2>Relay log</h2>
-    <ol class="logs" id="logs"></ol>
-  </section>
-
-  <section class="panel" id="artifactPanel" hidden>
-    <h2>Artifacts</h2>
-    <div id="artifacts"></div>
-  </section>
   </div>
-  </div>
-</main>
+  <div class="dlg-foot"><button type="button" class="btn primary" id="saveSettings">Save</button></div>
+</dialog>
+
+<dialog id="fileDlg">
+  <div class="dlg-head"><h2 id="fileName">file</h2><span><button type="button" class="icon-btn" id="copyFile">Copy</button> <button type="button" class="icon-btn" id="closeFile">Close</button></span></div>
+  <div class="dlg-body"><pre id="fileBody"></pre></div>
+</dialog>
 
 <script>
 (() => {
+  const NL = String.fromCharCode(10);
   const $ = (id) => document.getElementById(id);
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
     set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
   };
-
-  if (store.get("baton.remember") === "1") {
-    $("remember").checked = true;
-    $("groq").value = store.get("baton.groq") || "";
-    $("gemini").value = store.get("baton.gemini") || "";
-    $("openai").value = store.get("baton.openai") || "";
-    $("nvidia").value = store.get("baton.nvidia") || "";
-  }
-
-  const el = (tag, props = {}, ...kids) => {
-    const n = Object.assign(document.createElement(tag), props);
-    for (const k of kids) n.append(k);
+  const el = (tag, props, ...kids) => {
+    const n = Object.assign(document.createElement(tag), props || {});
+    for (const k of kids) if (k != null && k !== false) n.append(k);
     return n;
   };
-
-  function setStatus(text, isErr = false) {
-    $("status").textContent = text;
-    $("status").className = "status" + (isErr ? " err" : "");
-  }
-
+  const fmt = (n) => Math.round(n || 0).toLocaleString();
+  const short = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n || 0)));
+  const secs = (ms) => (ms / 1000).toFixed(1) + "s";
   function ago(iso) {
     const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
     if (s < 60) return "just now";
@@ -268,353 +288,609 @@ export const UI_HTML = /* html */ `<!doctype html>
     if (s < 86400) return Math.floor(s / 3600) + " h ago";
     return new Date(iso).toLocaleDateString();
   }
-
-  const fmt = (n) => Math.round(n || 0).toLocaleString();
-  const short = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n || 0)));
   const PROVIDER_LABEL = { groq: "Groq", google: "Gemini", nvidia: "NVIDIA NIM", openai: "OpenAI", baton: "Baton" };
+  const STATUS_TEXT = { success: "Done", partial: "Partly done", failed: "Failed", error: "Error", gated: "Answered locally" };
 
-  /** Table of per-model usage. "compact" drops the in/out columns (sidebar). */
-  function usageTable(byModel, total, compact) {
-    const head = compact ? ["Model", "Calls", "Tokens"] : ["Model", "Calls", "In", "Out", "Total"];
-    const cells = (m) => compact
-      ? [fmt(m.calls), short(m.totalTokens)]
-      : [fmt(m.calls), fmt(m.promptTokens), fmt(m.completionTokens), fmt(m.totalTokens)];
-    const row = (m) => {
-      const tr = el("tr", {},
-        el("td", {}, m.model, el("span", { className: "prov", textContent: PROVIDER_LABEL[m.provider] || m.provider })),
-        ...cells(m).map((c) => el("td", { textContent: c })));
-      tr.title = fmt(m.promptTokens) + " in · " + fmt(m.completionTokens) + " out" + (m.estimated ? " (some estimated)" : "");
-      return tr;
-    };
-    return el("table", { className: "utable" },
-      el("thead", {}, el("tr", {}, ...head.map((h) => el("th", { textContent: h })))),
-      el("tbody", {}, ...byModel.map(row)),
-      ...(byModel.length > 1 && total ? [el("tfoot", {}, el("tr", {}, el("td", { textContent: "Total" }), ...cells(total).map((c) => el("td", { textContent: c }))))] : []));
+  // ===================== API keys (Settings) =====================
+  const KEY_FIELDS = [
+    ["nvidia", "nvidiaApiKey", "NVIDIA NIM", "nvapi-...", "https://build.nvidia.com"],
+    ["groq", "groqApiKey", "Groq", "gsk_...", "https://console.groq.com/keys"],
+    ["gemini", "geminiApiKey", "Gemini", "AIza...", "https://aistudio.google.com/apikey"],
+    ["openai", "openaiApiKey", "OpenAI (paid)", "sk-...", "https://platform.openai.com/api-keys"],
+  ];
+  const keys = { nvidia: "", groq: "", gemini: "", openai: "" };
+  let remember = store.get("baton.remember") === "1";
+  if (remember) for (const [k] of KEY_FIELDS) keys[k] = store.get("baton." + k) || "";
+  const keyCount = () => KEY_FIELDS.filter(([k]) => keys[k].trim()).length;
+
+  function renderKeyStatus() {
+    const n = keyCount();
+    $("keyStatus").textContent = n ? n + " key" + (n === 1 ? "" : "s") : "none";
+    $("keyWarn").hidden = n > 0;
   }
+  function openSettings() {
+    $("keyFields").replaceChildren(...KEY_FIELDS.map(([k, , label, ph, url]) =>
+      el("div", { className: "field" },
+        el("label", { htmlFor: "key_" + k }, label, el("a", { href: url, target: "_blank", rel: "noopener", textContent: "Get a key" })),
+        el("input", { type: "password", id: "key_" + k, value: keys[k], placeholder: ph, autocomplete: "off" }))));
+    $("remember").checked = remember;
+    $("settingsDlg").showModal();
+    loadDebug().then((d) => { if (d) $("orderText").textContent = d.providerOrder.relay.map((p) => PROVIDER_LABEL[p] || p).join(" → "); });
+  }
+  function saveSettings() {
+    for (const [k] of KEY_FIELDS) keys[k] = ($("key_" + k).value || "").trim();
+    remember = $("remember").checked;
+    store.set("baton.remember", remember ? "1" : null);
+    for (const [k] of KEY_FIELDS) store.set("baton." + k, remember && keys[k] ? keys[k] : null);
+    $("settingsDlg").close();
+    renderKeyStatus();
+  }
+  $("openSettings").onclick = openSettings;
+  $("keyWarnBtn").onclick = openSettings;
+  $("saveSettings").onclick = saveSettings;
+  $("closeSettings").onclick = () => $("settingsDlg").close();
 
-  let usagePeriod = store.get("baton.usagePeriod") === "allTime" ? "allTime" : "today";
-  let usageData = null;
+  // ===================== Data: runs grouped into chats =====================
+  let runs = [];
+  let chats = [];
+  const records = new Map();
+  let currentChatId = store.get("baton.chat") || null;
+  let selectedRunId = null;
+  let running = false;
+  let liveEvents = [];
 
-  function renderUsage() {
-    if (!usageData) return;
-    const hasAny = usageData.allTime.runs > 0;
-    $("usage").hidden = !hasAny;
-    if (!hasAny) return;
-    $("uToday").classList.toggle("on", usagePeriod === "today");
-    $("uAll").classList.toggle("on", usagePeriod === "allTime");
-    $("uToday").setAttribute("aria-pressed", String(usagePeriod === "today"));
-    $("uAll").setAttribute("aria-pressed", String(usagePeriod === "allTime"));
-    const d = usageData[usagePeriod];
-    const body = $("usageBody");
-    if (!d.byModel.length) {
-      body.replaceChildren(el("p", { className: "note", textContent: usagePeriod === "today" ? "No tokens used today yet." : "No token usage recorded yet." }));
-      return;
+  function chatIdOf(r, byId) {
+    let c = r;
+    const seen = new Set();
+    while (!c.chatId && c.parentId && byId.has(c.parentId) && !seen.has(c.id)) { seen.add(c.id); c = byId.get(c.parentId); }
+    return c.chatId || c.id;
+  }
+  function groupChats() {
+    const byId = new Map(runs.map((r) => [r.id, r]));
+    const map = new Map();
+    for (const r of runs) {
+      const id = chatIdOf(r, byId);
+      if (!map.has(id)) map.set(id, []);
+      map.get(id).push(r);
     }
-    const since = usagePeriod === "allTime" && d.since ? " since " + new Date(d.since).toLocaleDateString() : "";
-    body.replaceChildren(
-      usageTable(d.byModel, d.total, true),
-      el("p", { className: "note", textContent: fmt(d.total.totalTokens) + " tokens · " + d.runs + " run" + (d.runs === 1 ? "" : "s") + since }));
+    chats = [...map].map(([id, rs]) => {
+      rs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      return { id, runs: rs, title: rs[0].userPrompt, updatedAt: rs[rs.length - 1].createdAt };
+    }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
-
-  async function loadUsage() {
+  async function loadRuns() {
     try {
-      const res = await fetch("/api/usage");
-      if (res.ok) usageData = await res.json();
-    } catch {}
-    renderUsage();
-  }
-
-  for (const [id, period] of [["uToday", "today"], ["uAll", "allTime"]]) {
-    $(id).addEventListener("click", () => { usagePeriod = period; store.set("baton.usagePeriod", period); renderUsage(); });
-  }
-
-  const STATUS_TEXT = { success: "success", partial: "partial", failed: "failed", error: "error", gated: "answered locally" };
-
-  // ---------- history ----------
-  let current = null; // the run being shown
-
-  async function loadHistory() {
-    let runs = [];
-    try {
-      const res = await fetch("/api/history");
+      const res = await fetch("/api/history?limit=1000");
       if (res.ok) runs = (await res.json()).runs || [];
     } catch {}
-    loadUsage();
-    $("historyEmpty").hidden = runs.length > 0;
-    $("clearAll").hidden = runs.length === 0;
-    $("runs").replaceChildren(...runs.map((r) => {
-      const files = r.artifactCount ? " · " + r.artifactCount + " file" + (r.artifactCount === 1 ? "" : "s") : "";
-      const toks = r.usage && r.usage.total.totalTokens ? " · " + short(r.usage.total.totalTokens) + " tok" : "";
-      const btn = el("button", { type: "button", className: "run" + (current && current.id === r.id ? " active" : "") },
-        el("span", { className: "p", textContent: (r.parentId ? "↳ " : "") + r.userPrompt }),
-        el("span", { className: "m" },
-          el("span", { className: "dot " + r.status }),
-          el("span", { textContent: (STATUS_TEXT[r.status] || r.status) + " · " + ago(r.createdAt) + files + toks })));
-      btn.title = new Date(r.createdAt).toLocaleString();
-      btn.dataset.id = r.id;
-      btn.addEventListener("click", () => openRun(r.id));
-      return el("li", {}, btn);
-    }));
-    return runs;
+    groupChats();
+    renderSidebar();
   }
-
-  async function openRun(id) {
+  async function getRecord(id) {
+    if (records.has(id)) return records.get(id);
     try {
       const res = await fetch("/api/history/" + encodeURIComponent(id));
-      if (!res.ok) throw new Error("not found");
-      render(await res.json());
-      store.set("baton.selected", id);
-    } catch {
-      store.set("baton.selected", null);
+      if (!res.ok) return null;
+      const rec = await res.json();
+      records.set(id, rec);
+      return rec;
+    } catch { return null; }
+  }
+  const currentChat = () => chats.find((c) => c.id === currentChatId) || null;
+
+  // ===================== Sidebar =====================
+  function renderSidebar() {
+    const box = $("chats");
+    if (!chats.length) { box.replaceChildren(el("div", { className: "side-empty", textContent: "No chats yet. Your projects and follow-ups will appear here." })); return; }
+    const today = new Date().toDateString();
+    const groups = [["Today", chats.filter((c) => new Date(c.updatedAt).toDateString() === today)], ["Earlier", chats.filter((c) => new Date(c.updatedAt).toDateString() !== today)]];
+    const out = [];
+    for (const [name, list] of groups) {
+      if (!list.length) continue;
+      out.push(el("h3", { textContent: name }));
+      for (const c of list) {
+        const last = c.runs[c.runs.length - 1];
+        const files = Math.max(0, ...c.runs.map((r) => r.artifactCount || 0));
+        const item = el("button", { type: "button", className: "chat-item" + (c.id === currentChatId ? " active" : ""), title: c.title },
+          el("span", { className: "t", textContent: c.title }),
+          el("span", { className: "m", textContent: c.runs.length + " message" + (c.runs.length === 1 ? "" : "s") + (files ? " · " + files + " files" : "") + " · " + ago(last.createdAt) }));
+        item.onclick = () => openChat(c.id);
+        const del = el("span", { className: "del", textContent: "×", title: "Delete chat", role: "button" });
+        del.onclick = (e) => { e.stopPropagation(); deleteChat(c); };
+        item.append(del);
+        out.push(item);
+      }
     }
+    box.replaceChildren(...out);
+  }
+  async function deleteChat(c) {
+    if (!confirm("Delete this chat and its " + c.runs.length + " message(s) from history?")) return;
+    for (const r of c.runs) { await fetch("/api/history/" + encodeURIComponent(r.id), { method: "DELETE" }).catch(() => {}); records.delete(r.id); }
+    if (c.id === currentChatId) newChat();
+    await loadRuns();
+    loadUsage();
   }
 
-  function markActive() {
-    for (const b of document.querySelectorAll(".run")) b.classList.toggle("active", !!current && b.dataset.id === current.id);
+  // ===================== Thread =====================
+  const SUGGESTIONS = [
+    ["Todo list app", "One HTML file with JS, saved in the browser", "Create a todo list using HTML and JS in a single index.html that saves items in localStorage"],
+    ["Student marks web app", "Register students and score marks", "Create a web app to register students and score their marks using HTML, CSS and JS"],
+    ["REST API", "Express.js auth service with JWT and bcrypt", "Create an Express.js authentication service with JWT and bcrypt"],
+    ["Project README", "A clear README for a command-line tool", "Write a README.md for a command-line tool that renames photos by date"],
+  ];
+  function scrollBottom() { const t = $("thread"); t.scrollTop = t.scrollHeight; }
+
+  function showWelcome() {
+    $("chatTitle").textContent = "New chat";
+    $("downloadLatest").hidden = true;
+    $("threadInner").replaceChildren(el("div", { className: "welcome" },
+      el("h1", { textContent: "What should Baton build?" }),
+      el("p", { textContent: "Describe a project. Baton plans it, builds each file on free AI providers, and switches provider automatically when one is busy or out of quota. Reply in the same chat to change the project." }),
+      el("div", { className: "suggest" }, ...SUGGESTIONS.map(([title, sub, prompt]) => {
+        const b = el("button", { type: "button" }, el("b", { textContent: title }), el("span", { textContent: sub }));
+        b.onclick = () => { $("prompt").value = prompt; autosize(); $("prompt").focus(); };
+        return b;
+      }))));
   }
 
-  // ---------- result view ----------
-  function render(run) {
-    current = run;
-    markActive();
-    $("results").hidden = false;
-    const when = run.createdAt ? new Date(run.createdAt).toLocaleString() : "";
-    const secs = run.durationMs != null ? " · took " + (run.durationMs / 1000).toFixed(1) + "s" : "";
-    const via = run.providers && run.providers.length ? " · keys: " + run.providers.join(", ") : "";
-    $("runMeta").textContent = [when, run.taskType].filter(Boolean).join(" · ") + secs + via;
-    $("runPrompt").textContent = run.userPrompt || "";
-    $("deleteRun").hidden = !run.id;
-    renderChain(run);
-    $("continue").hidden = !(run.id && Object.keys(run.artifacts || {}).length && run.status !== "error" && run.status !== "gated");
-    renderContexts(run);
+  function newChat() {
+    currentChatId = null;
+    store.set("baton.chat", null);
+    selectedRunId = null;
+    showWelcome();
+    renderSidebar();
+    updateComposer();
+    renderDebug();
+    closeSide();
+    $("prompt").focus();
+  }
+  $("newChat").onclick = newChat;
 
-    const summary = $("summary");
-    summary.replaceChildren(el("span", { className: "pill " + run.status, textContent: STATUS_TEXT[run.status] || run.status }));
-    if (run.status === "gated") {
-      summary.append(el("span", { textContent: (run.message || run.response || "") + " (0 tokens used)" }));
-    } else if (run.summary) {
-      summary.append(el("span", { textContent: " " + run.summary.completedTasks + " of " + run.summary.totalTasks + " files built " }));
-    }
-    const files = Object.keys(run.artifacts || {}).length;
-    if (files && run.downloadUrl) summary.append(el("a", { className: "dl", href: run.downloadUrl, textContent: "Download .zip" }));
+  async function openChat(id) {
+    currentChatId = id;
+    store.set("baton.chat", id);
+    renderSidebar();
+    closeSide();
+    const chat = currentChat();
+    if (!chat) { newChat(); return; }
+    $("chatTitle").textContent = chat.title;
+    const recs = (await Promise.all(chat.runs.map((r) => getRecord(r.id)))).filter(Boolean);
+    $("threadInner").replaceChildren(...recs.flatMap((rec) => [userMsg(rec.userPrompt), botMsg(rec)]));
+    const latestFiles = [...recs].reverse().find((r) => Object.keys(r.artifacts || {}).length && r.status !== "error");
+    $("downloadLatest").hidden = !latestFiles;
+    if (latestFiles) $("downloadLatest").href = "/api/download/" + latestFiles.id;
+    selectedRunId = recs.length ? recs[recs.length - 1].id : null;
+    updateComposer();
+    renderDebug();
+    scrollBottom();
+  }
 
-    const u = run.usage;
-    const tokBox = $("runTokens");
-    if (run.status === "gated") {
-      tokBox.hidden = false;
-      tokBox.replaceChildren(el("span", {}, "Tokens: ", el("strong", { textContent: "0" })));
-    } else if (u && u.total) {
-      tokBox.hidden = false;
-      tokBox.replaceChildren(
-        el("span", {}, "Tokens: ", el("strong", { textContent: fmt(u.total.totalTokens) }), " "),
-        el("span", { className: "by", textContent: "(" + fmt(u.total.promptTokens) + " in, " + fmt(u.total.completionTokens) + " out" + (u.total.estimated ? ", some estimated" : "") + ")" }),
-        ...(u.byModel && u.byModel.length ? [usageTable(u.byModel, u.total, false)] : []),
-      );
+  const userMsg = (text) => el("div", { className: "msg user" }, el("div", { className: "bubble", textContent: text }));
+
+  function routeOf(rec) {
+    const used = [];
+    for (const l of rec.executionLogs || []) if ((l.event === "execute" || l.event === "plan") && !used.includes(l.provider)) used.push(l.provider);
+    return used.map((p) => PROVIDER_LABEL[p] || p).join(" → ");
+  }
+
+  function botMsg(rec) {
+    const body = el("div", { className: "bot" });
+    const files = Object.keys(rec.artifacts || {});
+    const ch = rec.changes;
+    const line = el("div", { className: "line" }, el("span", { className: "pill " + rec.status, textContent: STATUS_TEXT[rec.status] || rec.status }));
+    if (rec.status === "gated") {
+      body.append(line, el("div", { className: "text", textContent: rec.message || "" }));
+    } else if (rec.status === "error") {
+      body.append(line, el("div", { className: "errbox", textContent: rec.message || "Something went wrong." }));
     } else {
-      tokBox.hidden = true;
-    }
-
-    const isErr = run.status === "error";
-    $("runError").hidden = !isErr;
-    $("runError").textContent = isErr ? run.message || "Something went wrong." : "";
-
-    const logs = run.executionLogs || [];
-    $("logPanel").hidden = logs.length === 0;
-    $("logs").replaceChildren(...logs.map((l) =>
-      el("li", {},
-        el("span", { className: "ev " + l.event, textContent: l.event }), " ",
-        l.message, " ",
-        el("span", { className: "meta", textContent: "(" + l.provider + " / " + l.model + ")" }),
-        ...(l.tokens ? [" ", el("span", { className: "tok", textContent: "· " + fmt(l.tokens.totalTokens) + " tokens" + (l.tokens.estimated ? " (est.)" : "") })] : []),
-      )));
-
-    const entries = Object.entries(run.artifacts || {});
-    $("artifactPanel").hidden = entries.length === 0;
-    $("artifacts").replaceChildren(...entries.map(([path, content], i) =>
-      el("details", { open: i === 0 }, el("summary", { textContent: path }), el("pre", { textContent: content }))));
-  }
-
-  // ---------- follow-ups ----------
-  let followUp = null;
-  try { followUp = JSON.parse(store.get("baton.followUp") || "null"); } catch {}
-
-  function setFollowUp(fu) {
-    followUp = fu;
-    store.set("baton.followUp", fu ? JSON.stringify(fu) : null);
-    $("followup").hidden = !fu;
-    $("promptLabel").textContent = fu ? "What should Baton change?" : "What should Baton build?";
-    $("prompt").placeholder = fu ? "e.g. add a delete button to each row and a logo in the header" : "Create an Express.js authentication service with JWT and bcrypt";
-    if (fu) {
-      $("fuPrompt").textContent = "\u201c" + (fu.prompt.length > 90 ? fu.prompt.slice(0, 87) + "..." : fu.prompt) + "\u201d";
-      $("fuFiles").textContent = "(" + fu.files + " file" + (fu.files === 1 ? "" : "s") + ")";
-    }
-  }
-  setFollowUp(followUp);
-
-  const followUpFrom = (run) => ({ id: run.id, prompt: run.userPrompt || "", files: Object.keys(run.artifacts || {}).length, taskType: run.taskType });
-
-  $("continue").addEventListener("click", () => {
-    if (!current) return;
-    setFollowUp(followUpFrom(current));
-    if (current.taskType) $("taskType").value = current.taskType;
-    $("prompt").value = "";
-    $("prompt").focus();
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  });
-  $("fuCancel").addEventListener("click", () => setFollowUp(null));
-
-  function renderChain(run) {
-    const box = $("runChain");
-    const earlier = run.conversation || [];
-    const ch = run.changes;
-    if (!run.parentId && !earlier.length) { box.hidden = true; return; }
-    box.hidden = false;
-    box.replaceChildren(
-      el("div", { textContent: "Follow-up. Earlier requests in this project:" }),
-      el("ol", {}, ...earlier.map((p) => el("li", { textContent: p }))),
-      ...(ch && (ch.modified.length || ch.added.length)
-        ? [el("div", { className: "changes", textContent:
-            [ch.modified.length ? "Changed: " + ch.modified.join(", ") : "", ch.added.length ? "Added: " + ch.added.join(", ") : ""]
-              .filter(Boolean).join(" · ") + " · project now has " + Object.keys(run.artifacts || {}).length + " files" })]
-        : []));
-  }
-
-  function renderContexts(run) {
-    const list = run.contexts || [];
-    $("ctxPanel").hidden = list.length === 0;
-    if (!list.length) return;
-    const origins = run.artifactOrigins || {};
-    const logs = run.executionLogs || [];
-    $("ctx").replaceChildren(...list.map((c) => {
-      const title = c.kind === "plan"
-        ? el("h3", { textContent: "Plan" })
-        : el("h3", {}, "Step " + c.step + " \u00b7 " + c.target + " ",
-            el("span", { className: "meta", textContent: c.targetExisted ? "(rewrite of an existing file)" : "(new file)" }));
-
-      // Who received this exact context, in order: failures first, then the model that answered.
-      const attempts = logs.filter((l) => l.step === c.step && l.event !== "complete" && !/^skipped:/.test(l.message));
-      const sent = el("div", { className: "sent" }, "Sent to: ");
-      attempts.forEach((l, i) => {
-        const ok = l.event === "execute" || l.event === "plan";
-        if (i) sent.append(" \u2192 ");
-        const why = ok ? " \u2713" : " \u2717 " + l.message.split(";")[0].replace(/^(HTTP \\d+ [^:]+).*$/, "$1");
-        sent.append(el("span", { className: ok ? "ok" : "bad", textContent: l.provider + "/" + l.model + why }));
-      });
-      if (!attempts.length) sent.append("(no attempts recorded)");
-
-      const chips = el("div", { className: "chips" });
-      const chip = (text, tip, cls) => { const n = el("span", { className: "chip" + (cls ? " " + cls : ""), textContent: text }); if (tip) n.title = tip; chips.append(n); };
-      chip("Goal", c.goal);
-      if (c.conversation && c.conversation.length) chip("Earlier requests (" + c.conversation.length + ")", c.conversation.map((p, i) => (i + 1) + ". " + p).join("\\n"));
-      const dec = Object.entries(c.decisions || {});
-      if (dec.length) chip("Decisions: " + dec.map(([k, v]) => k + "=" + v).join(", "));
-      if (c.manifest && c.manifest.length) chip("File list (" + c.manifest.length + ")", c.manifest.join("\\n"));
-      for (const f of c.files || []) {
-        const o = origins[f.path];
-        const from = f.source === "previous"
-          ? "earlier run" + (f.by ? ", " + f.by : "")
-          : (o ? "Step " + o.step + ", " : "") + (f.by || "this run");
-        const n = el("span", { className: "chip file" + (f.source === "previous" ? " prev" : "") },
-          f.path + " ", el("span", { className: "from", textContent: "\u00b7 ~" + short(f.tokens) + " tok \u00b7 from " + from }));
-        chips.append(n);
+      let summary = "";
+      if (rec.parentId && ch) {
+        summary = [ch.modified.length ? "Changed " + ch.modified.join(", ") : "", ch.added.length ? "Added " + ch.added.join(", ") : ""].filter(Boolean).join(" · ") || "No files changed";
+      } else if (rec.summary) {
+        summary = "Built " + rec.summary.completedTasks + " of " + rec.summary.totalTasks + " file" + (rec.summary.totalTasks === 1 ? "" : "s");
       }
-      if (c.targetExisted) chip("Current " + c.target + " to rewrite", "", "file prev");
-
-      const prompt = el("details", {},
-        el("summary", { textContent: "View exact prompt (~" + fmt(c.promptTokens) + " tokens)" }),
-        el("pre", { textContent: (c.messages || []).map((m) => "[" + m.role + "]\\n" + m.content).join("\\n\\n") }));
-      return el("li", {}, title, sent, el("div", { className: "meta", textContent: "Received:" }), chips, prompt);
-    }));
+      line.append(el("span", { textContent: summary }));
+      body.append(line);
+      const failed = ((rec.plan && rec.plan.tasks) || []).filter((t) => t.status === "failed").map((t) => t.targetArtifact);
+      if (failed.length) body.append(el("div", { className: "errbox", textContent: "Not built: " + failed.join(", ") + ". Open Debug to see why each provider failed." }));
+    }
+    if (files.length) {
+      const changed = new Set(ch ? [...ch.modified, ...ch.added] : []);
+      body.append(el("div", { className: "files" }, ...files.map((f) => {
+        const b = el("button", { type: "button", className: "filechip" + (changed.has(f) && rec.parentId ? " changed" : ""), title: "View " + f }, f,
+          changed.has(f) && rec.parentId ? el("span", { className: "tag", textContent: ch.added.includes(f) ? "new" : "changed" }) : null);
+        b.onclick = () => showFile(f, rec.artifacts[f]);
+        return b;
+      })));
+    }
+    const u = rec.usage && rec.usage.total;
+    const route = routeOf(rec);
+    const meta = [
+      u ? fmt(u.totalTokens) + " tokens" : rec.status === "gated" ? "0 tokens" : "",
+      rec.calls ? rec.calls.length + " provider call" + (rec.calls.length === 1 ? "" : "s") : "",
+      rec.durationMs != null ? secs(rec.durationMs) : "",
+      route ? "via " + route : "",
+    ].filter(Boolean).join(" · ");
+    if (meta) body.append(el("div", { className: "mmeta", textContent: meta }));
+    const actions = el("div", { className: "mactions" });
+    if (files.length && rec.status !== "error" && rec.id) actions.append(el("a", { className: "linkbtn", href: "/api/download/" + rec.id, textContent: "Download .zip" }));
+    if (rec.id) {
+      const dbg = el("button", { type: "button", className: "linkbtn", textContent: "Debug this run" });
+      dbg.onclick = () => { selectedRunId = rec.id; openDebug("run"); };
+      actions.append(dbg);
+    }
+    const reuse = el("button", { type: "button", className: "linkbtn muted", textContent: "Edit & resend" });
+    reuse.onclick = () => { $("prompt").value = rec.userPrompt || ""; autosize(); $("prompt").focus(); };
+    actions.append(reuse);
+    body.append(actions);
+    return el("div", { className: "msg" }, el("div", { className: "avatar", textContent: "B" }), body);
   }
 
-  $("reuse").addEventListener("click", () => {
-    if (!current) return;
-    $("prompt").value = current.userPrompt || "";
-    if (current.taskType) $("taskType").value = current.taskType;
-    $("prompt").focus();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  function showFile(name, content) {
+    $("fileName").textContent = name;
+    $("fileBody").textContent = content;
+    $("fileDlg").showModal();
+  }
+  $("closeFile").onclick = () => $("fileDlg").close();
+  $("copyFile").onclick = async () => {
+    try { await navigator.clipboard.writeText($("fileBody").textContent); $("copyFile").textContent = "Copied"; }
+    catch { $("copyFile").textContent = "Copy failed"; }
+    setTimeout(() => ($("copyFile").textContent = "Copy"), 1200);
+  };
+
+  // ===================== Composer =====================
+  function continueTarget() {
+    const chat = currentChat();
+    if (!chat) return null;
+    for (let i = chat.runs.length - 1; i >= 0; i--) {
+      const r = chat.runs[i];
+      if (r.artifactCount && r.status !== "error" && r.status !== "gated") return r;
+    }
+    return null;
+  }
+  function updateComposer() {
+    const t = continueTarget();
+    const hint = $("composerHint");
+    hint.className = "hint" + (t ? " cont" : "");
+    hint.textContent = t
+      ? "Follow-up: Baton will change this project (" + t.artifactCount + " files)"
+      : currentChatId ? "No files in this chat yet: your message starts a new project" : "New project";
+    $("prompt").placeholder = t ? "What should Baton change? e.g. add a delete button and a logo" : "Describe what Baton should build...";
+    if (t && t.taskType) $("taskType").value = t.taskType;
+  }
+  function autosize() { const t = $("prompt"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 220) + "px"; }
+  $("prompt").addEventListener("input", autosize);
+  $("prompt").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("composer").requestSubmit(); }
   });
 
-  $("deleteRun").addEventListener("click", async () => {
-    if (!current || !current.id || !confirm("Delete this run from history?")) return;
-    await fetch("/api/history/" + encodeURIComponent(current.id), { method: "DELETE" }).catch(() => {});
-    current = null;
-    store.set("baton.selected", null);
-    $("results").hidden = $("logPanel").hidden = $("artifactPanel").hidden = true;
-    await loadHistory();
-  });
+  function randomHex(bytes) {
+    const a = new Uint8Array(bytes);
+    crypto.getRandomValues(a); // works on plain-http LAN pages too, unlike randomUUID
+    return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
 
-  $("clearAll").addEventListener("click", async () => {
-    if (!confirm("Delete ALL runs from history? This cannot be undone.")) return;
-    await fetch("/api/history", { method: "DELETE" }).catch(() => {});
-    current = null;
-    store.set("baton.selected", null);
-    $("results").hidden = $("logPanel").hidden = $("artifactPanel").hidden = true;
-    await loadHistory();
-  });
-
-  // ---------- run a prompt ----------
-  $("form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const remember = $("remember").checked;
-    store.set("baton.remember", remember ? "1" : null);
-    store.set("baton.groq", remember ? $("groq").value : null);
-    store.set("baton.gemini", remember ? $("gemini").value : null);
-    store.set("baton.openai", remember ? $("openai").value : null);
-    store.set("baton.nvidia", remember ? $("nvidia").value : null);
-
-    $("go").disabled = true;
-    setStatus("Planning and building. This can take a minute…");
-    const userPrompt = $("prompt").value;
-    const taskType = $("taskType").value;
-    try {
-      const res = await fetch("/api/orchestrate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userPrompt,
-          taskType,
-          continueFrom: followUp ? followUp.id : undefined,
-          keys: {
-            groqApiKey: $("groq").value.trim() || undefined,
-            geminiApiKey: $("gemini").value.trim() || undefined,
-            openaiApiKey: $("openai").value.trim() || undefined,
-            nvidiaApiKey: $("nvidia").value.trim() || undefined,
-          },
-        }),
-      });
-      let data = {};
-      try { data = await res.json(); } catch {}
-      setStatus(data.error === "missing_keys" ? "Add at least one API key (Groq, Gemini, NVIDIA NIM or OpenAI) to run a project." : "", data.error === "missing_keys");
-      if (data.error === "follow_up_not_found") {
-        setFollowUp(null);
-        setStatus(data.message + " Follow-up mode switched off.", true);
-      }
-      await loadHistory();
-      if (data.historyId) {
-        await openRun(data.historyId);
-        // Keep the conversation going: the next prompt continues from the newest version of the project.
-        if (followUp && current && current.id === data.historyId && Object.keys(current.artifacts || {}).length && current.status !== "error") {
-          setFollowUp(followUpFrom(current));
-          $("prompt").value = "";
+  // Live progress shown inside the pending assistant message
+  function pendingMsg() {
+    const status = el("span", { className: "pill running", textContent: "Working" });
+    const timer = el("span", { className: "muted", textContent: "0.0s" });
+    const list = el("ol", { className: "progress" });
+    const t0 = Date.now();
+    const tick = setInterval(() => (timer.textContent = secs(Date.now() - t0)), 100);
+    const node = el("div", { className: "msg" }, el("div", { className: "avatar", textContent: "B" }),
+      el("div", { className: "bot" }, el("div", { className: "line" }, status, el("span", { className: "spinner" }), timer), list));
+    const calls = new Map();
+    const add = (ic, cls, text) => {
+      const li = el("li", {}, el("span", { className: "ic " + cls, textContent: ic }), el("span", { className: cls === "dim" ? "dim" : "", textContent: text }));
+      list.append(li); scrollBottom(); return li;
+    };
+    return {
+      node,
+      stop() { clearInterval(tick); },
+      onEvent(e) {
+        if (e.type === "start") add("·", "dim", e.followUpOf ? "Continuing this project from your previous message" : "Starting a new project");
+        else if (e.type === "plan") add("✓", "ok", "Planned " + e.tasks.length + " file" + (e.tasks.length === 1 ? "" : "s") + ": " + e.tasks.map((t) => t.targetArtifact).join(", "));
+        else if (e.type === "call") {
+          const c = e.call;
+          const key = c.step + "|" + c.provider + "|" + c.model;
+          const where = c.step === 0 ? "Planning" : "Step " + c.step;
+          if (c.phase === "start") {
+            const li = el("li", {}, el("span", { className: "ic wait" }, el("span", { className: "spinner" })), el("span", { textContent: where + ": calling " + c.provider + "/" + c.model + "..." }));
+            list.append(li); calls.set(key, li); scrollBottom();
+          } else {
+            const li = calls.get(key) || add("", "", "");
+            const ok = c.outcome === "ok";
+            li.replaceChildren(el("span", { className: "ic " + (ok ? "ok" : "bad"), textContent: ok ? "✓" : "✗" }),
+              el("span", { textContent: where + ": " + c.provider + "/" + c.model + (ok ? "" : " — " + (c.detail || c.outcome)) + " · " + secs(c.latencyMs || 0) + (c.tokens ? " · " + fmt(c.tokens.totalTokens) + " tok" : "") }));
+            calls.delete(key);
+          }
+        } else if (e.type === "log") {
+          const l = e.entry;
+          if (l.event === "execute") add("✓", "ok", "Wrote " + l.message.replace("Generated ", "").replace(" successfully", ""));
+          else if (l.event === "failover" && l.message.indexOf("skipped:") === 0) add("↷", "dim", (PROVIDER_LABEL[l.provider] || l.provider) + " " + l.message);
+          else if (l.event === "failover" && l.message.indexOf("passing") >= 0) add("→", "dim", l.message.slice(l.message.indexOf(";") + 2));
         }
-      } else {
-        // History unavailable: show the response directly.
-        render({ ...data, userPrompt, taskType, status: res.ok ? data.status : "error",
-          message: data.message || data.response || (res.ok ? "" : "HTTP " + res.status) });
-      }
+      },
+    };
+  }
+
+  $("composer").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (running) return;
+    const userPrompt = $("prompt").value.trim();
+    if (!userPrompt) return;
+    running = true;
+    $("send").disabled = true;
+    const target = continueTarget();
+    if (!currentChatId) $("threadInner").replaceChildren();
+    $("threadInner").append(userMsg(userPrompt));
+    const pending = pendingMsg();
+    $("threadInner").append(pending.node);
+    scrollBottom();
+    $("prompt").value = "";
+    autosize();
+
+    const clientRunId = randomHex(16);
+    liveEvents = [];
+    selectedRunId = null;
+    renderDebug();
+    let es = null;
+    try {
+      es = new EventSource("/api/progress/" + clientRunId);
+      es.onmessage = (m) => {
+        try { const ev = JSON.parse(m.data); liveEvents.push({ at: new Date().toISOString(), ev }); pending.onEvent(ev); renderLive(); } catch {}
+      };
+    } catch {}
+
+    const payload = {
+      userPrompt,
+      taskType: $("taskType").value,
+      keys: Object.fromEntries(KEY_FIELDS.map(([k, field]) => [field, keys[k].trim() || undefined])),
+      continueFrom: target ? target.id : undefined,
+      chatId: currentChatId || undefined,
+      clientRunId,
+    };
+    let data = {};
+    try {
+      const res = await fetch("/api/orchestrate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      try { data = await res.json(); } catch {}
+      if (!res.ok && !data.historyId) data = { ...data, status: "error", message: data.message || "HTTP " + res.status };
     } catch (err) {
-      setStatus("Could not reach the Baton server: " + err.message, true);
+      data = { status: "error", message: "Could not reach the Baton server: " + err.message };
     } finally {
-      $("go").disabled = false;
+      pending.stop();
+      if (es) setTimeout(() => es.close(), 300);
+      running = false;
+      $("send").disabled = false;
     }
+    await loadRuns();
+    if (data.historyId) {
+      const run = runs.find((r) => r.id === data.historyId);
+      await openChat((run && run.chatId) || data.chatId || data.historyId);
+    } else {
+      pending.node.replaceWith(botMsg({ id: "", status: "error", message: data.message, userPrompt, artifacts: {} }));
+    }
+    loadUsage();
+    if (debugOpen && debugTab === "server") renderDebug();
+    $("prompt").focus();
   });
 
-  // ---------- restore after refresh ----------
-  loadHistory().then((runs) => {
-    const saved = store.get("baton.selected");
-    const pick = runs.find((r) => r.id === saved) || runs[0];
-    if (pick) openRun(pick.id);
+  // ===================== Token usage (sidebar) =====================
+  let usagePeriod = store.get("baton.usagePeriod") === "allTime" ? "allTime" : "today";
+  let usageData = null;
+  function renderUsage() {
+    if (!usageData) return;
+    $("uToday").classList.toggle("on", usagePeriod === "today");
+    $("uAll").classList.toggle("on", usagePeriod === "allTime");
+    $("usageSummary").textContent = short(usageData.today.total.totalTokens) + " today";
+    const d = usageData[usagePeriod];
+    if (!d.byModel.length) { $("usageBody").replaceChildren(el("p", { className: "muted", textContent: usagePeriod === "today" ? "No tokens used today yet." : "No usage recorded yet." })); return; }
+    $("usageBody").replaceChildren(
+      table(["Model", "Calls", "Tokens"], d.byModel.map((m) => [el("span", {}, m.model, el("div", { className: "muted", textContent: PROVIDER_LABEL[m.provider] || m.provider })), fmt(m.calls), short(m.totalTokens)]), [1, 2]),
+      el("p", { className: "muted", textContent: fmt(d.total.totalTokens) + " tokens · " + d.runs + " runs" }));
+  }
+  async function loadUsage() {
+    try { const r = await fetch("/api/usage"); if (r.ok) usageData = await r.json(); } catch {}
+    renderUsage();
+  }
+  $("uToday").onclick = () => { usagePeriod = "today"; store.set("baton.usagePeriod", "today"); renderUsage(); };
+  $("uAll").onclick = () => { usagePeriod = "allTime"; store.set("baton.usagePeriod", "allTime"); renderUsage(); };
+
+  // ===================== Debug drawer =====================
+  let debugOpen = store.get("baton.debug") === "1";
+  let debugTab = store.get("baton.debugTab") === "server" ? "server" : "run";
+
+  function table(head, rows, numCols) {
+    const nums = new Set(numCols || []);
+    return el("div", { className: "tablewrap" }, el("table", { className: "dtable" },
+      el("thead", {}, el("tr", {}, ...head.map((h, i) => el("th", { className: nums.has(i) ? "num" : "", textContent: h })))),
+      el("tbody", {}, ...rows.map((r) => el("tr", {}, ...r.map((c, i) => {
+        const td = el("td", { className: nums.has(i) ? "num" : (i === r.length - 1 ? "wrap" : "") });
+        if (c instanceof Node) td.append(c); else td.textContent = c == null ? "" : String(c);
+        return td;
+      }))))));
+  }
+  const sec = (title, sub, ...kids) => el("div", { className: "dsec" },
+    el("h4", {}, el("span", { textContent: title }), sub ? (sub instanceof Node ? sub : el("span", { className: "sub", textContent: sub })) : null), ...kids);
+  const kv = (pairs) => el("dl", { className: "kv" }, ...pairs.filter((p) => p[1] != null && p[1] !== "").flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", { textContent: String(v) })]));
+  const statusCell = (c) => el("span", { className: c.outcome === "ok" ? "s-ok" : "s-bad", textContent: (c.status || "-") + " " + c.outcome });
+  const time = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  function setDebugOpen(open) {
+    debugOpen = open;
+    store.set("baton.debug", open ? "1" : null);
+    $("debug").hidden = !open;
+    $("debugBtn").classList.toggle("on", open);
+    $("debugBtn").setAttribute("aria-pressed", String(open));
+    $("debugState").textContent = open ? "on" : "off";
+    if (open) renderDebug();
+  }
+  function openDebug(tab) { if (tab) setTab(tab); setDebugOpen(true); closeSide(); }
+  function setTab(tab) {
+    debugTab = tab;
+    store.set("baton.debugTab", tab);
+    $("tabRun").classList.toggle("on", tab === "run");
+    $("tabServer").classList.toggle("on", tab === "server");
+  }
+  $("debugBtn").onclick = () => setDebugOpen(!debugOpen);
+  $("openDebugSide").onclick = () => setDebugOpen(!debugOpen);
+  $("closeDebug").onclick = () => setDebugOpen(false);
+  $("tabRun").onclick = () => { setTab("run"); renderDebug(); };
+  $("tabServer").onclick = () => { setTab("server"); renderDebug(); };
+
+  function renderDebug() {
+    if (!debugOpen) return;
+    if (debugTab === "server") renderServer(); else renderRun();
+  }
+  function renderLive() {
+    if (debugOpen && debugTab === "run" && !selectedRunId) renderRun();
+  }
+  function liveSection() {
+    if (!liveEvents.length) return null;
+    return sec("Live events", running ? "streaming..." : liveEvents.length + " events", el("ol", { className: "dlog live" }, ...liveEvents.map(({ at, ev }) => {
+      let text = ev.type;
+      if (ev.type === "call") text += " " + ev.call.phase + " step=" + ev.call.step + " " + ev.call.provider + "/" + ev.call.model + (ev.call.phase === "end" ? " status=" + (ev.call.status || "-") + " " + ev.call.outcome + " " + ev.call.latencyMs + "ms" : "");
+      else if (ev.type === "log") text += " [" + ev.entry.step + "] " + ev.entry.event + " " + ev.entry.provider + ": " + ev.entry.message;
+      else if (ev.type === "plan") text += " " + ev.tasks.map((t) => t.targetArtifact).join(", ");
+      else if (ev.type === "done") text += " status=" + ev.status + (ev.historyId ? " id=" + ev.historyId : "");
+      else if (ev.type === "start") text += " run=" + ev.runId + (ev.followUpOf ? " followUpOf=" + ev.followUpOf : "");
+      return el("li", { textContent: time(at) + "  " + text });
+    })));
+  }
+
+  async function renderRun() {
+    const body = $("debugBody");
+    if (!selectedRunId) {
+      body.replaceChildren(liveSection() || sec("This run", "", el("p", { className: "muted", textContent: running ? "Waiting for events..." : "Send a message, or click 'Debug this run' under any reply." })));
+      return;
+    }
+    const rec = await getRecord(selectedRunId);
+    if (!rec) { body.replaceChildren(sec("This run", "", el("p", { className: "muted", textContent: "Run not found." }))); return; }
+    const u = rec.usage && rec.usage.total;
+    const out = [];
+    out.push(sec("Overview", rec.status, kv([
+      ["Run id", rec.id], ["Chat id", rec.chatId], ["Follow-up of", rec.parentId], ["Status", rec.status],
+      ["Started", new Date(rec.createdAt).toLocaleString()], ["Duration", rec.durationMs != null ? secs(rec.durationMs) : ""],
+      ["Task type", rec.taskType], ["Keys used", (rec.providers || []).join(", ")],
+      ["Tokens", u ? fmt(u.totalTokens) + " (" + fmt(u.promptTokens) + " in, " + fmt(u.completionTokens) + " out)" : ""],
+      ["Files", Object.keys(rec.artifacts || {}).length],
+    ])));
+    if (rec.message && rec.status === "error") out.push(sec("Error", "", el("div", { className: "errbox", textContent: rec.message })));
+    if (rec.calls && rec.calls.length) {
+      out.push(sec("Provider calls", rec.calls.length + " HTTP requests", table(["Step", "Provider / model", "Status", "Time", "Tokens", "Detail"],
+        rec.calls.map((c) => [c.step === 0 ? "plan" : c.step, c.provider + "/" + c.model, statusCell(c), (c.latencyMs || 0) + "ms", c.tokens ? fmt(c.tokens.totalTokens) : "", c.detail || ""]), [3, 4])));
+    } else if (rec.status !== "gated") {
+      out.push(sec("Provider calls", "", el("p", { className: "muted", textContent: "Not recorded for runs made before this update." })));
+    }
+    if (rec.usage && rec.usage.byModel && rec.usage.byModel.length) {
+      out.push(sec("Tokens by model", "", table(["Model", "Calls", "In", "Out", "Total"], rec.usage.byModel.map((m) => [m.provider + "/" + m.model, m.calls, fmt(m.promptTokens), fmt(m.completionTokens), fmt(m.totalTokens)]), [1, 2, 3, 4])));
+    }
+    if ((rec.executionLogs || []).length) {
+      out.push(sec("Relay log", rec.executionLogs.length + " entries", el("ol", { className: "dlog" }, ...rec.executionLogs.map((l) =>
+        el("li", {}, el("span", { className: "muted", textContent: time(l.timestamp) + " [" + l.step + "] " }), el("span", { className: "ev " + l.event, textContent: l.event }),
+          " " + l.provider + "/" + l.model + ": " + l.message + (l.tokens ? " (" + fmt(l.tokens.totalTokens) + " tok)" : ""))))));
+    }
+    if ((rec.contexts || []).length) out.push(contextSection(rec));
+    const slim = { ...rec,
+      artifacts: Object.fromEntries(Object.entries(rec.artifacts || {}).map(([k, v]) => [k, "(" + v.length + " chars)"])),
+      contexts: (rec.contexts || []).map((c) => ({ ...c, messages: "(" + (c.messages || []).length + " messages, see context section)" })) };
+    out.push(sec("Raw record", "file contents shortened", el("details", {}, el("summary", { className: "linkbtn", textContent: "Show JSON" }), el("pre", { className: "raw", textContent: JSON.stringify(slim, null, 2) }))));
+    const del = el("button", { type: "button", className: "dbtn", textContent: "Delete this run" });
+    del.onclick = async () => {
+      if (!confirm("Delete this run from history?")) return;
+      await fetch("/api/history/" + encodeURIComponent(rec.id), { method: "DELETE" }).catch(() => {});
+      records.delete(rec.id);
+      selectedRunId = null;
+      await loadRuns();
+      if (currentChat()) openChat(currentChatId); else newChat();
+    };
+    out.push(el("div", {}, del));
+    const live = liveSection();
+    if (live && liveEvents.some((x) => x.ev.type === "done" && x.ev.historyId === rec.id)) out.splice(1, 0, live);
+    body.replaceChildren(...out);
+  }
+
+  function contextSection(rec) {
+    const origins = rec.artifactOrigins || {};
+    const logs = rec.executionLogs || [];
+    return sec("How context was shared", "",
+      el("p", { className: "muted", style: "margin:0 0 8px", textContent: "Each step gets the same shared workspace (goal, decisions, file list, full text of every file so far), so any model can continue where another stopped." }),
+      el("ol", { className: "ctx" }, ...rec.contexts.map((c) => {
+        const attempts = logs.filter((l) => l.step === c.step && l.event !== "complete" && l.message.indexOf("skipped:") !== 0);
+        const sent = attempts.map((l) => l.provider + "/" + l.model + (l.event === "execute" || l.event === "plan" ? " ✓" : " ✗")).join(" → ");
+        const chips = el("div", { className: "chips" });
+        const chip = (t, tip, cls) => { const n = el("span", { className: "chip" + (cls ? " " + cls : ""), textContent: t }); if (tip) n.title = tip; chips.append(n); };
+        chip("Goal", c.goal);
+        if (c.conversation && c.conversation.length) chip("Earlier requests (" + c.conversation.length + ")", c.conversation.join(NL));
+        const dec = Object.entries(c.decisions || {});
+        if (dec.length) chip("Decisions: " + dec.map(([k, v]) => k + "=" + v).join(", "));
+        if (c.manifest && c.manifest.length) chip("File list (" + c.manifest.length + ")", c.manifest.join(NL));
+        for (const f of c.files || []) {
+          const o = origins[f.path];
+          const from = f.source === "previous" ? "earlier run" : (o ? "step " + o.step : "this run");
+          chip(f.path + " · ~" + short(f.tokens) + " tok · " + from, f.by || "", "file" + (f.source === "previous" ? " prev" : ""));
+        }
+        if (c.targetExisted) chip("current " + c.target + " to rewrite", "", "file prev");
+        return el("li", {},
+          el("h5", { textContent: c.kind === "plan" ? "Plan" : "Step " + c.step + " · " + c.target + (c.targetExisted ? " (rewrite)" : " (new)") }),
+          el("div", { className: "muted", textContent: "Sent to: " + (sent || "-") }),
+          chips,
+          el("details", {}, el("summary", { className: "linkbtn", textContent: "Exact prompt (~" + fmt(c.promptTokens) + " tokens)" }),
+            el("pre", { className: "raw", textContent: (c.messages || []).map((m) => "[" + m.role + "]" + NL + m.content).join(NL + NL) })));
+      })));
+  }
+
+  async function loadDebug() {
+    try { const r = await fetch("/api/debug"); return r.ok ? await r.json() : null; } catch { return null; }
+  }
+
+  async function renderServer() {
+    const body = $("debugBody");
+    const d = await loadDebug();
+    if (!d) { body.replaceChildren(sec("Server", "", el("p", { className: "muted", textContent: "Could not load /api/debug." }))); return; }
+    const refresh = el("button", { type: "button", className: "dbtn", textContent: "Refresh" });
+    refresh.onclick = renderServer;
+    const forget = el("button", { type: "button", className: "dbtn", textContent: "Forget all" });
+    forget.onclick = async () => { await fetch("/api/debug/memory", { method: "DELETE" }).catch(() => {}); renderServer(); };
+    const label = (p) => PROVIDER_LABEL[p] || p;
+    const until = (iso) => "until " + new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const m = d.memory;
+    const remembered = m.retiredModels.length || m.discoveredModels.length || m.busyProviders.length;
+    body.replaceChildren(
+      sec("Server", refresh, kv([["Started", new Date(d.server.startedAt).toLocaleString()], ["Uptime", Math.round(d.server.uptimeSec / 60) + " min"], ["Node", d.server.node], ["Data folder", d.server.dataDir], ["Saved runs", d.server.historyRuns]])),
+      sec("Provider order", "", kv([["Planning", d.providerOrder.planner.map(label).join(" → ")], ["Building", d.providerOrder.relay.map(label).join(" → ")]])),
+      sec("Models (tried in order)", "", table(["Provider", "Code", "Other tasks"], [
+        ["Groq", d.models.groq.code.join(", "), d.models.groq.general.join(", ")],
+        ["Gemini", d.models.google.join(", "), "same"],
+        ["NVIDIA NIM", d.models.nvidia.code.join(", "), d.models.nvidia.general.join(", ")],
+        ["OpenAI", d.models.openai.join(", "), "same"],
+      ])),
+      sec("Settings", "", kv([["Provider timeout", d.settings.providerTimeoutMs + " ms"], ["Overload retry wait", d.settings.overloadRetryMs + " ms"], ["Busy provider skip", Math.round(d.settings.busySkipMs / 60000) + " min"], ["Retired model memory", Math.round(d.settings.deadModelTtlMs / 3600000) + " h"], ["Download links", Math.round(d.settings.workspaceTtlSec / 60) + " min, then from history"], ["History limit", d.settings.historyMax + " runs"]])),
+      sec("What Baton remembers", forget, remembered
+        ? el("div", {},
+            m.busyProviders.length ? table(["Busy provider (skipped)", "Key", "Until"], m.busyProviders.map((b) => [label(b.provider), b.keyHash, until(b.until)])) : null,
+            m.retiredModels.length ? table(["Retired model", "Provider", "Key", "Until"], m.retiredModels.map((r) => [r.model, label(r.provider), r.keyHash, until(r.until)])) : null,
+            m.discoveredModels.length ? table(["Discovered replacement", "Provider", "Key", "Until"], m.discoveredModels.map((r) => [r.model, label(r.provider), r.keyHash, until(r.until)])) : null)
+        : el("p", { className: "muted", textContent: "Nothing yet. Retired models, discovered replacements and busy providers appear here. Memory resets when the server restarts." })),
+      sec("Recent provider calls", d.recentCalls.length + " (all runs)", d.recentCalls.length
+        ? table(["Time", "Step", "Provider / model", "Status", "Latency", "Tokens", "Detail"], d.recentCalls.map((c) => [time(c.at), c.step === 0 ? "plan" : (c.step == null ? "" : c.step), c.provider + "/" + c.model, statusCell(c), (c.latencyMs || 0) + "ms", c.tokens ? fmt(c.tokens.totalTokens) : "", c.detail || ""]), [4, 5])
+        : el("p", { className: "muted", textContent: "No provider calls since the server started." })),
+    );
+  }
+
+  // ===================== Mobile sidebar =====================
+  function closeSide() { $("side").classList.remove("open"); $("scrim").classList.remove("show"); }
+  $("menuBtn").onclick = () => { $("side").classList.add("open"); $("scrim").classList.add("show"); };
+  $("scrim").onclick = closeSide;
+
+  // ===================== Start =====================
+  renderKeyStatus();
+  setTab(debugTab);
+  setDebugOpen(debugOpen);
+  loadUsage();
+  loadRuns().then(() => {
+    if (currentChatId && currentChat()) openChat(currentChatId);
+    else { currentChatId = null; showWelcome(); updateComposer(); }
   });
 })();
 </script>
