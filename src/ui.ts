@@ -178,6 +178,20 @@ export const UI_HTML = /* html */ `<!doctype html>
   .check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
   .btn { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 6px 14px; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .orderchip { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--text); max-width: 46%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .orderchip:hover { border-color: var(--accent); color: var(--accent); }
+  .orderlist { list-style: none; margin: 0; padding: 0; }
+  .orderlist li { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-bottom: 6px; background: var(--panel); }
+  .orderlist li.dragging { opacity: .5; }
+  .orderlist li.over { border-color: var(--accent); }
+  .orderlist li.off .oname { color: var(--muted); text-decoration: line-through; }
+  .orderlist .handle { cursor: grab; color: var(--muted); user-select: none; font-size: 16px; line-height: 1; }
+  .orderlist .num { width: 18px; text-align: center; font-weight: 700; color: var(--accent); font-size: 13px; }
+  .orderlist .oname { flex: 1; min-width: 0; }
+  .orderlist .oname small { display: block; color: var(--muted); font-size: 12px; }
+  .orderlist .oname small.nokey { color: var(--warn); }
+  .orderlist .arrows button { border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 0 7px; font-size: 13px; }
+  .orderlist .arrows button:disabled { opacity: .35; cursor: default; }
   .keyres { font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
   .keyres.ok { color: var(--ok); } .keyres.bad { color: var(--warn); }
   .keyres .muted { display: block; }
@@ -237,6 +251,7 @@ export const UI_HTML = /* html */ `<!doctype html>
             <option value="document">Document</option>
             <option value="analysis">Analysis</option>
           </select>
+          <button type="button" class="orderchip" id="orderBtn" title="Choose which AI Baton calls first">Order</button>
           <span class="hint" id="composerHint">New project</span>
           <button type="submit" class="send" id="send">Send</button>
         </div>
@@ -261,6 +276,15 @@ export const UI_HTML = /* html */ `<!doctype html>
     <label class="check"><input type="checkbox" id="remember" /> Remember keys in this browser</label>
   </div>
   <div class="dlg-foot"><button type="button" class="btn" id="testKeys">Test keys</button><button type="button" class="btn primary" id="saveSettings">Save</button></div>
+</dialog>
+
+<dialog id="orderDlg">
+  <div class="dlg-head"><h2>Provider order</h2><button type="button" class="icon-btn" id="closeOrder">Done</button></div>
+  <div class="dlg-body">
+    <p class="muted" style="margin-top:0;font-size:13px">Baton calls providers from top to bottom, for the plan and for every file, and moves to the next one when a provider fails. Drag rows or use the arrows to reorder. Untick a provider to skip it completely.</p>
+    <ol class="orderlist" id="orderList"></ol>
+  </div>
+  <div class="dlg-foot"><button type="button" class="btn" id="resetOrder">Reset to default</button><button type="button" class="btn primary" id="doneOrder">Done</button></div>
 </dialog>
 
 <dialog id="fileDlg">
@@ -320,7 +344,7 @@ export const UI_HTML = /* html */ `<!doctype html>
         el("div", { className: "keyres", id: "keyres_" + k }))));
     $("remember").checked = remember;
     $("settingsDlg").showModal();
-    loadDebug().then((d) => { if (d) $("orderText").textContent = d.providerOrder.relay.map((p) => PROVIDER_LABEL[p] || p).join(" → "); });
+    $("orderText").textContent = orderSummary() + " (change it with the Order button next to Send)";
   }
   function saveSettings() {
     for (const [k] of KEY_FIELDS) keys[k] = ($("key_" + k).value || "").trim();
@@ -329,6 +353,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     for (const [k] of KEY_FIELDS) store.set("baton." + k, remember && keys[k] ? keys[k] : null);
     $("settingsDlg").close();
     renderKeyStatus();
+    renderOrderChip();
   }
   $("openSettings").onclick = openSettings;
   $("keyWarnBtn").onclick = openSettings;
@@ -359,6 +384,81 @@ export const UI_HTML = /* html */ `<!doctype html>
     }
   };
   $("closeSettings").onclick = () => $("settingsDlg").close();
+
+  // ===================== Provider order (chosen before sending) =====================
+  const ALL_PROVIDERS = ["nvidia", "groq", "google", "openrouter", "openai"];
+  const KEY_OF = { nvidia: "nvidia", groq: "groq", google: "gemini", openrouter: "openrouter", openai: "openai" };
+  const hasKey = (p) => !!(keys[KEY_OF[p]] || "").trim();
+  let order = null; // [{ id, on }]
+  try {
+    const saved = JSON.parse(store.get("baton.order") || "null");
+    if (Array.isArray(saved)) order = saved.filter((o) => ALL_PROVIDERS.includes(o.id));
+  } catch {}
+  function completeOrder(list) {
+    const seen = new Set(list.map((o) => o.id));
+    return list.concat(ALL_PROVIDERS.filter((p) => !seen.has(p)).map((id) => ({ id, on: true })));
+  }
+  async function defaultOrder() {
+    const d = await loadDebug();
+    const ids = d ? d.providerOrder.relay : ALL_PROVIDERS;
+    return completeOrder(ids.filter((p) => ALL_PROVIDERS.includes(p)).map((id) => ({ id, on: true })));
+  }
+  function saveOrder() { store.set("baton.order", JSON.stringify(order)); renderOrderChip(); }
+  const activeOrder = () => (order || []).filter((o) => o.on && hasKey(o.id)).map((o) => o.id);
+  function orderSummary() {
+    const a = activeOrder();
+    return a.length ? a.map((p) => PROVIDER_LABEL[p] || p).join(" → ") : "no provider switched on with a key";
+  }
+  function renderOrderChip() {
+    const a = activeOrder();
+    $("orderBtn").textContent = "Order: " + (a.length ? a.map((p) => PROVIDER_LABEL[p] || p).join(" → ") : "none");
+    $("orderBtn").title = "Baton tries: " + orderSummary() + ". Click to change.";
+  }
+  let dragFrom = -1;
+  function renderOrderList() {
+    const list = $("orderList");
+    let rank = 0;
+    list.replaceChildren(...order.map((o, i) => {
+      const keyed = hasKey(o.id);
+      const active = o.on && keyed;
+      if (active) rank++;
+      const cb = el("input", { type: "checkbox", checked: o.on, title: o.on ? "Switch off" : "Switch on" });
+      cb.onchange = () => { o.on = cb.checked; saveOrder(); renderOrderList(); };
+      const up = el("button", { type: "button", textContent: "↑", disabled: i === 0, title: "Move up" });
+      up.onclick = () => { order.splice(i - 1, 0, order.splice(i, 1)[0]); saveOrder(); renderOrderList(); };
+      const down = el("button", { type: "button", textContent: "↓", disabled: i === order.length - 1, title: "Move down" });
+      down.onclick = () => { order.splice(i + 1, 0, order.splice(i, 1)[0]); saveOrder(); renderOrderList(); };
+      const li = el("li", { className: o.on ? "" : "off", draggable: true },
+        el("span", { className: "handle", textContent: "⋮⋮", title: "Drag to reorder" }),
+        el("span", { className: "num", textContent: active ? String(rank) : "–" }),
+        cb,
+        el("span", { className: "oname" }, PROVIDER_LABEL[o.id] || o.id,
+          el("small", { className: keyed ? "" : "nokey", textContent: !keyed ? "No API key: add one in Settings" : o.on ? (rank === 1 ? "Called first" : "Fallback #" + (rank - 1)) : "Switched off: never called" })),
+        el("span", { className: "arrows" }, up, " ", down));
+      li.addEventListener("dragstart", () => { dragFrom = i; li.classList.add("dragging"); });
+      li.addEventListener("dragend", () => li.classList.remove("dragging"));
+      li.addEventListener("dragover", (e) => { e.preventDefault(); li.classList.add("over"); });
+      li.addEventListener("dragleave", () => li.classList.remove("over"));
+      li.addEventListener("drop", (e) => {
+        e.preventDefault();
+        if (dragFrom < 0 || dragFrom === i) return;
+        order.splice(i, 0, order.splice(dragFrom, 1)[0]);
+        dragFrom = -1;
+        saveOrder();
+        renderOrderList();
+      });
+      return li;
+    }));
+  }
+  async function openOrder() {
+    if (!order) { order = await defaultOrder(); saveOrder(); }
+    renderOrderList();
+    $("orderDlg").showModal();
+  }
+  $("orderBtn").onclick = openOrder;
+  $("closeOrder").onclick = () => $("orderDlg").close();
+  $("doneOrder").onclick = () => $("orderDlg").close();
+  $("resetOrder").onclick = async () => { order = await defaultOrder(); saveOrder(); renderOrderList(); };
 
   // ===================== Data: runs grouped into chats =====================
   let runs = [];
@@ -699,6 +799,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       continueFrom: target ? target.id : undefined,
       chatId: currentChatId || undefined,
       clientRunId,
+      providerOrder: order ? order.filter((o) => o.on).map((o) => o.id) : undefined,
     };
     let data = {};
     try {
@@ -822,6 +923,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       ["Run id", rec.id], ["Chat id", rec.chatId], ["Follow-up of", rec.parentId], ["Status", rec.status],
       ["Started", new Date(rec.createdAt).toLocaleString()], ["Duration", rec.durationMs != null ? secs(rec.durationMs) : ""],
       ["Task type", rec.taskType], ["Keys used", (rec.providers || []).join(", ")],
+      ["Provider order", (rec.providerOrder || []).map((p) => PROVIDER_LABEL[p] || p).join(" → ")],
       ["Tokens", u ? fmt(u.totalTokens) + " (" + fmt(u.promptTokens) + " in, " + fmt(u.completionTokens) + " out)" : ""],
       ["Files", Object.keys(rec.artifacts || {}).length],
     ])));
@@ -936,6 +1038,8 @@ export const UI_HTML = /* html */ `<!doctype html>
 
   // ===================== Start =====================
   renderKeyStatus();
+  if (order) { order = completeOrder(order); renderOrderChip(); }
+  else defaultOrder().then((o) => { order = o; saveOrder(); });
   setTab(debugTab);
   setDebugOpen(debugOpen);
   loadUsage();

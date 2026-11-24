@@ -35,6 +35,12 @@ const orchestrateSchema = {
       continueFrom: { type: "string", pattern: "^(ws|run)_[A-Za-z0-9_]+$" },
       chatId: { type: "string", pattern: "^(ws|run)_[A-Za-z0-9_]+$" },
       clientRunId: { type: "string", pattern: "^[a-f0-9]{8,64}$" },
+      providerOrder: {
+        type: "array",
+        maxItems: 5,
+        uniqueItems: true,
+        items: { type: "string", enum: ["nvidia", "groq", "google", "gemini", "openrouter", "openai"] },
+      },
       taskType: { type: "string", enum: ["code", "document", "analysis"] },
       keys: {
         type: "object",

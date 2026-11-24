@@ -21,6 +21,8 @@ export interface HistoryRecord {
   message?: string;
   /** Which providers had keys for this run (names only, never the keys). */
   providers: string[];
+  /** The order providers were tried in (only providers with keys). */
+  providerOrder?: string[];
   summary?: OrchestrateResponse["summary"];
   /** Tokens spent by this run (absent for gated prompts and old records). */
   usage?: RunUsage;

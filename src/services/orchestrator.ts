@@ -32,8 +32,8 @@ export class FollowUpError extends Error {
 }
 
 export class MissingKeysError extends Error {
-  constructor() {
-    super("Provide at least one API key: keys.groqApiKey, keys.geminiApiKey, keys.nvidiaApiKey, keys.openrouterApiKey or keys.openaiApiKey (BYOK).");
+  constructor(message?: string) {
+    super(message ?? "Provide at least one API key: keys.groqApiKey, keys.geminiApiKey, keys.nvidiaApiKey, keys.openrouterApiKey or keys.openaiApiKey (BYOK).");
     this.name = "MissingKeysError";
   }
 }
@@ -51,6 +51,8 @@ export function newWorkspaceId(now = Date.now()): string {
 export function buildTargets(
   keys: OrchestrateRequest["keys"],
   taskType: TaskType,
+  /** Per-request order from the UI. Providers not listed are not used. Overrides BATON_*_ORDER. */
+  order?: string[],
 ): { planner: ProviderTarget[]; relay: ProviderTarget[] } {
   const gemini = keys.geminiApiKey ? geminiTarget(keys.geminiApiKey) : undefined;
   const groq = keys.groqApiKey ? groqTarget(keys.groqApiKey, taskType) : undefined;
@@ -60,7 +62,16 @@ export function buildTargets(
   const byName: Record<string, ProviderTarget | undefined> = { nvidia, groq, google: gemini, openrouter, openai };
   const ordered = (order: string[]) =>
     order.map((name) => byName[name]).filter((x): x is ProviderTarget => Boolean(x));
+  if (order) {
+    const chosen = normalizeOrder(order);
+    return { planner: ordered(chosen), relay: ordered(chosen) };
+  }
   return { planner: ordered(providerOrder("planner")), relay: ordered(providerOrder("relay")) };
+}
+
+/** Lowercase, accept "gemini" for "google", drop unknown names and duplicates. */
+export function normalizeOrder(order: string[]): string[] {
+  return [...new Set(order.map((s) => String(s).trim().toLowerCase().replace(/^gemini$/, "google")).filter((s) => KNOWN_PROVIDERS.includes(s)))];
 }
 
 const KNOWN_PROVIDERS = ["nvidia", "groq", "google", "openrouter", "openai"];
@@ -101,13 +112,17 @@ export async function orchestrate(
     nvidiaApiKey: req.keys?.nvidiaApiKey?.trim() || undefined,
     openrouterApiKey: req.keys?.openrouterApiKey?.trim() || undefined,
   };
-  const providers = [
+  const keyed = [
     keys.groqApiKey && "groq",
     keys.geminiApiKey && "google",
     keys.nvidiaApiKey && "nvidia",
     keys.openrouterApiKey && "openrouter",
     keys.openaiApiKey && "openai",
   ].filter((p): p is string => Boolean(p));
+  // A provider order from the UI also switches providers off: only listed ones are used.
+  const order = req.providerOrder ? normalizeOrder(req.providerOrder) : undefined;
+  const providers = order ? order.filter((p) => keyed.includes(p)) : keyed;
+  const effectiveOrder = (order ?? providerOrder("relay")).filter((p) => keyed.includes(p));
 
   // Live progress for the browser (optional), and the chat thread this run belongs to.
   const emit = req.clientRunId && CLIENT_RUN_ID_RE.test(req.clientRunId) ? progressEmitter(req.clientRunId) : undefined;
@@ -127,6 +142,7 @@ export async function orchestrate(
         providers,
         executionLogs: [],
         artifacts: {},
+        providerOrder: effectiveOrder,
         ...r,
         chatId: r.chatId ?? chatId ?? r.id,
       });
@@ -146,7 +162,9 @@ export async function orchestrate(
   }
 
   if (providers.length === 0) {
-    const err = new MissingKeysError();
+    const err = new MissingKeysError(
+      keyed.length ? "Every provider that has a key is switched off in the provider order. Turn at least one on." : undefined,
+    );
     const historyId = await record({ id: runId(), status: "error", message: err.message });
     Object.assign(err, { historyId });
     emit?.({ type: "done", status: "error", historyId, message: err.message });
@@ -205,7 +223,7 @@ export async function orchestrate(
   });
 
   try {
-    const targets = buildTargets(keys, taskType);
+    const targets = buildTargets(keys, taskType, order);
 
     // Stage 2 — planning (Gemini as architect, Groq as safety net).
     await planWorkspace(ws, targets.planner);

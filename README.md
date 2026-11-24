@@ -17,6 +17,7 @@ Open http://localhost:3000. It works like a typical AI chat app:
 
 * **Sidebar:** **+ New chat**, your chats (a project plus its follow-ups), token usage, **Settings & API keys**, and the **Debug panel** toggle.
 * **Thread:** your messages, and Baton's replies with status, files (click to view), **Download .zip**, tokens, and which providers did the work.
+* **Provider order:** the **Order** button next to Send shows which AI Baton calls first (e.g. `Order: Groq → Gemini`). Click it to reorder providers (drag, or ↑/↓) and untick any you want skipped. The order is saved in your browser, sent with every message (`providerOrder`), used for both planning and building, and shown per run in the debug panel. Providers you switch off are never called.
 * **Composer:** Enter sends, Shift+Enter adds a new line. In an open chat your message **continues that project** (a follow-up); **+ New chat** starts a fresh one.
 * **Live progress:** while a run is going you see each step as it happens: planning, each provider call (✓ / ✗ with the reason, time and tokens), failovers and files written.
 * **Debug panel:**
@@ -124,6 +125,7 @@ curl -s localhost:3000/api/orchestrate -H 'content-type: application/json' -d '{
 * `taskType`: `code` (default), `document`, or `analysis`.
 * `keys`: at least one is required (BYOK). With only one key, Baton runs single-provider and loses failover.
   * Default order for both planning and building: **NVIDIA NIM → Groq → Gemini → OpenRouter → OpenAI**. Change it with `BATON_PROVIDER_ORDER=groq,nvidia,google,openai`, or for one stage only with `BATON_PLANNER_ORDER` / `BATON_RELAY_ORDER`.
+  * `providerOrder` (optional): e.g. `["groq", "google", "openrouter"]`. Providers in this order for this request; providers not listed are not used. Overrides the env defaults.
   * `continueFrom` (optional): a history id. The run then **changes that project** instead of starting a new one (see Follow-ups).
   * Default models: see `.env.example`. Each provider has an ordered model list (`GROQ_*_MODELS`, `GEMINI_MODELS`, `NVIDIA_*_MODELS`, `OPENAI_MODELS`).
   * NVIDIA NIM uses `integrate.api.nvidia.com`, with keys from build.nvidia.com.

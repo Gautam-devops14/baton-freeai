@@ -169,6 +169,8 @@ export interface OrchestrateRequest {
   chatId?: string;
   /** Random id chosen by the browser so it can subscribe to live progress before the run starts. */
   clientRunId?: string;
+  /** Providers to use, in order (planning and building). Unlisted providers are not used. */
+  providerOrder?: string[];
 }
 
 export interface OrchestrateResponse {
