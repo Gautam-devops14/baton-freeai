@@ -225,6 +225,20 @@ export function isAccountLevel(err: ProviderError): boolean {
   return err.kind === "auth" || err.kind === "billing" || err.kind === "network" || err.accountLevel === true;
 }
 
+/** Problems that usually clear within a minute on free tiers: worth a cool-down and another round. */
+export function isTransient(err: ProviderError): boolean {
+  if (err.accountLevel && err.kind !== "network") return false;
+  return ["rate_limit", "overloaded", "timeout", "server", "network"].includes(err.kind);
+}
+
+/** Cool-down waits (seconds) before retrying the whole provider order, from BATON_COOLDOWN_STEPS (default "30,60"). */
+export function cooldownSteps(): number[] {
+  return (process.env.BATON_COOLDOWN_STEPS ?? "30,60")
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
 /** When every model failed, report the most actionable reason (a rate limit can be waited out; a retirement can't). */
 const KIND_PRIORITY: ProviderErrorKind[] = ["rate_limit", "overloaded", "timeout", "server", "bad_response", "client", "model_unavailable"];
 

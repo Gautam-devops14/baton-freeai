@@ -136,6 +136,20 @@ export function snapshotMemory() {
   };
 }
 
+/** Why a provider is currently skipped (undefined if it isn't). */
+export function skipReasonFor(t: ProviderTarget): string | undefined {
+  return skipInfo(t)?.reason;
+}
+
+/**
+ * Skipped for a reason that waiting a minute won't fix (key rejected, no credit,
+ * daily cap, no working models), as opposed to being briefly busy.
+ */
+export function isAccountSkipped(t: ProviderTarget): boolean {
+  const r = skipReasonFor(t);
+  return r !== undefined && r !== SKIP_REASONS.busy;
+}
+
 /** Debug panel: forget everything Baton learned about providers. */
 export function forgetProviderMemory(): void {
   deadModels.clear();

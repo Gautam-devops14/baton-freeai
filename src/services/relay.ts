@@ -2,9 +2,9 @@
 // Explicit and imperative by design (guardrail 5): every prompt is built here,
 // from the shared workspace, so any model can pick up where another stopped.
 
-import { chatCompletion, ProviderError } from "../providers/client.js";
+import { chatCompletion, cooldownSteps, isTransient, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
-import { busyUntilFor, splitBusy } from "../providers/memory.js";
+import { busyUntilFor, isAccountSkipped, splitBusy } from "../providers/memory.js";
 import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 import { extractArtifactBody } from "./sanitize.js";
 import { outlineFile } from "./outline.js";
@@ -296,6 +296,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
 
     const done = (): boolean => task.status === "completed"; // read fresh: attempt() mutates it
     const rateLimited: Array<{ target: ProviderTarget; readyAt: number }> = [];
+    let sawTransient = false;
     for (const [i, target] of candidates.entries()) {
       const next = candidates[i + 1];
       const nextLabel = next && (PROVIDER_NAMES[next.provider] ?? next.provider);
@@ -306,6 +307,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         failure = await attempt(target, i === candidates.length - 1, nextLabel);
       }
       if (!failure) break;
+      if (isTransient(failure.pe)) sawTransient = true;
       if (failure.pe.kind === "rate_limit" && busyUntilFor(target) === undefined) {
         rateLimited.push({ target, readyAt: failure.at + (failure.pe.retryAfterMs ?? UNKNOWN_RATE_RESET_MS) });
       }
@@ -322,6 +324,25 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         await sleep(wait);
         cooldowns.delete(keyOf(target));
         if (!(await attempt(target, true, undefined))) break;
+      }
+    }
+
+    // Cool-down rounds: every provider failed with problems that usually clear within a minute
+    // (rate limits, 503 blips, timeouts). Wait, then retry the whole order, before giving up.
+    if (!done() && sawTransient) {
+      for (const secs of cooldownSteps()) {
+        const retryable = opts.targets.filter((t) => cooldowns.get(keyOf(t)) !== Number.POSITIVE_INFINITY && !isAccountSkipped(t));
+        if (!retryable.length) break;
+        log(ws, task.id, "failover", { provider: "baton", model: "relay" },
+          `all providers are busy or rate limited; cooling down ${secs}s, then retrying ${retryable.map((t) => PROVIDER_NAMES[t.provider] ?? t.provider).join(" → ")}`);
+        await sleep(secs * 1000);
+        for (const [i, target] of retryable.entries()) {
+          cooldowns.delete(keyOf(target));
+          const next = retryable[i + 1];
+          const failure = await attempt(target, i === retryable.length - 1, next && (PROVIDER_NAMES[next.provider] ?? next.provider));
+          if (!failure) break;
+        }
+        if (done()) break;
       }
     }
 

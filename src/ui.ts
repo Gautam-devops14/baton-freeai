@@ -766,6 +766,8 @@ export const UI_HTML = /* html */ `<!doctype html>
           else if (l.event === "plan" && l.message.indexOf("Answered") === 0) add("✓", "ok", "It's a question: answering directly, no files");
           else if (l.event === "failover" && l.message.indexOf("skipped:") === 0) add("↷", "dim", "Skipped " + (PROVIDER_LABEL[l.provider] || l.provider) + ": " + l.message.split(": ").slice(2).join(": "));
           else if (l.event === "failover" && l.message.indexOf("waiting ") === 0) add("⏱", "wait", (PROVIDER_LABEL[l.provider] || l.provider) + ": " + l.message);
+          else if (l.event === "failover" && l.message.indexOf("pacing:") === 0) add("⏱", "wait", (PROVIDER_LABEL[l.provider] || l.provider) + " " + l.message);
+          else if (l.event === "failover" && l.message.indexOf("cooling down") >= 0) add("⏱", "wait", l.message.charAt(0).toUpperCase() + l.message.slice(1));
           else if (l.event === "failover" && l.message.indexOf("passing") >= 0) add("→", "dim", l.message.slice(l.message.indexOf(";") + 2));
         }
       },
