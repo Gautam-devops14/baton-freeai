@@ -9,7 +9,12 @@ import { extractArtifactBody } from "./sanitize.js";
 
 const DEFAULT_COOLDOWN_MS = 60_000;
 
-const PROVIDER_NAMES: Record<string, string> = { google: "Google AI Studio", groq: "Groq", openai: "OpenAI" };
+const PROVIDER_NAMES: Record<string, string> = {
+  google: "Google AI Studio",
+  groq: "Groq",
+  nvidia: "NVIDIA NIM",
+  openai: "OpenAI",
+};
 
 const ROLE_BY_TYPE: Record<BatonWorkspace["taskType"], string> = {
   code: "a senior software engineer. Write complete, runnable source code",
@@ -86,7 +91,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         task.status = "completed";
         task.assignedProvider = target.provider;
         task.assignedModel = result.model;
-        log(ws, task.id, "execute", { ...target, model: result.model }, `Generated ${task.targetArtifact} successfully`);
+        log(ws, task.id, "execute", { ...target, model: result.model }, `Generated ${task.targetArtifact} successfully`, result.usage);
         break;
       } catch (err) {
         const pe =

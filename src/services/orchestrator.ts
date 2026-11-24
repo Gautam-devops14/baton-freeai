@@ -3,6 +3,7 @@
 import { randomBytes } from "node:crypto";
 import { geminiTarget } from "../providers/gemini.js";
 import { groqTarget } from "../providers/groq.js";
+import { nvidiaTarget } from "../providers/nvidia.js";
 import { openaiTarget } from "../providers/openai.js";
 import type {
   BatonWorkspace,
@@ -13,7 +14,7 @@ import type {
   TaskType,
 } from "../types.js";
 import { gate } from "./gate.js";
-import { log } from "./logging.js";
+import { log, sumUsage } from "./logging.js";
 import { planWorkspace } from "./planner.js";
 import { runRelay } from "./relay.js";
 import type { HistoryRecord, HistoryStore } from "./history.js";
@@ -21,7 +22,7 @@ import type { WorkspaceStore } from "./storage.js";
 
 export class MissingKeysError extends Error {
   constructor() {
-    super("Provide at least one of keys.groqApiKey, keys.geminiApiKey or keys.openaiApiKey (BYOK).");
+    super("Provide at least one API key: keys.groqApiKey, keys.geminiApiKey, keys.nvidiaApiKey or keys.openaiApiKey (BYOK).");
     this.name = "MissingKeysError";
   }
 }
@@ -42,12 +43,13 @@ export function buildTargets(
 ): { planner: ProviderTarget[]; relay: ProviderTarget[] } {
   const gemini = keys.geminiApiKey ? geminiTarget(keys.geminiApiKey) : undefined;
   const groq = keys.groqApiKey ? groqTarget(keys.groqApiKey, taskType) : undefined;
+  const nvidia = keys.nvidiaApiKey ? nvidiaTarget(keys.nvidiaApiKey, taskType) : undefined;
   const openai = keys.openaiApiKey ? openaiTarget(keys.openaiApiKey) : undefined;
   const present = (t: (ProviderTarget | undefined)[]) => t.filter((x): x is ProviderTarget => Boolean(x));
   return {
-    // OpenAI is paid, so it is always the last resort.
-    planner: present([gemini, groq, openai]), // Gemini is the architect, Groq the safety net
-    relay: present([groq, gemini, openai]), // Groq is the sprint tier, Gemini the fallback
+    // Free tiers first; OpenAI is paid, so it is always the last resort.
+    planner: present([gemini, groq, nvidia, openai]), // Gemini is the architect
+    relay: present([groq, gemini, nvidia, openai]), // Groq is the sprint tier
   };
 }
 
@@ -68,10 +70,12 @@ export async function orchestrate(
     groqApiKey: req.keys?.groqApiKey?.trim() || undefined,
     geminiApiKey: req.keys?.geminiApiKey?.trim() || undefined,
     openaiApiKey: req.keys?.openaiApiKey?.trim() || undefined,
+    nvidiaApiKey: req.keys?.nvidiaApiKey?.trim() || undefined,
   };
   const providers = [
     keys.groqApiKey && "groq",
     keys.geminiApiKey && "google",
+    keys.nvidiaApiKey && "nvidia",
     keys.openaiApiKey && "openai",
   ].filter((p): p is string => Boolean(p));
 
@@ -148,10 +152,12 @@ export async function orchestrate(
       completedTasks: completed.length,
       artifactsGenerated: completed.map((t) => t.targetArtifact),
     };
+    const usage = sumUsage(ws.executionLogs);
     const historyId = await record({
       id: ws.workspaceId,
       status,
       summary,
+      usage,
       executionLogs: ws.executionLogs,
       artifacts: ws.artifacts,
     });
@@ -164,6 +170,7 @@ export async function orchestrate(
       summary,
       artifacts: ws.artifacts,
       executionLogs: ws.executionLogs,
+      usage,
       downloadUrl: `/api/download/${ws.workspaceId}`,
     };
   } catch (err) {
@@ -172,6 +179,7 @@ export async function orchestrate(
       id: ws.workspaceId,
       status: "error",
       message,
+      usage: sumUsage(ws.executionLogs), // a failed run can still have spent tokens (e.g. an unusable plan)
       executionLogs: ws.executionLogs,
       artifacts: ws.artifacts,
     });

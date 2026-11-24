@@ -4,7 +4,7 @@
 
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExecutionLog, OrchestrateResponse, TaskType } from "../types.js";
+import type { ExecutionLog, OrchestrateResponse, RunUsage, TaskType } from "../types.js";
 
 export type RunStatus = OrchestrateResponse["status"] | "gated" | "error";
 
@@ -21,6 +21,8 @@ export interface HistoryRecord {
   /** Which providers had keys for this run (names only, never the keys). */
   providers: string[];
   summary?: OrchestrateResponse["summary"];
+  /** Tokens spent by this run (absent for gated prompts and old records). */
+  usage?: RunUsage;
   executionLogs: ExecutionLog[];
   artifacts: Record<string, string>;
 }

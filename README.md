@@ -1,6 +1,6 @@
 # Baton
 
-A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project with Gemini 3.8 Flash, builds each artifact on Groq, and when Groq returns a 429 or times out it hands the work to Gemini. An optional OpenAI key adds a paid last-resort tier. The task keeps going without restarting, because all context lives in a shared workspace rather than in any one model's chat history.
+A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project with Gemini 3.8 Flash, builds each artifact on Groq, and when Groq returns a 429 or times out it hands the work to Gemini. Optional NVIDIA NIM (free developer tier) and OpenAI (paid) keys add more fallback tiers. The task keeps going without restarting, because all context lives in a shared workspace rather than in any one model's chat history.
 
 ## Quick start
 
@@ -13,7 +13,17 @@ npm run build && npm start
 
 ## Web UI
 
-Open http://localhost:3000, paste your Groq, Gemini and/or OpenAI key, describe a project and click **Run**. You'll see the relay log, each generated file, and a .zip download link. Keys are only stored in your browser if you tick "Remember keys".
+Open http://localhost:3000, paste any of your Groq, Gemini, NVIDIA NIM or OpenAI keys, describe a project and click **Run**. You'll see the relay log, each generated file, and a .zip download link. Keys are only stored in your browser if you tick "Remember keys".
+
+## Token counter
+
+Every provider call records the tokens it used, as reported by the provider (`usage` in the response). If a provider doesn't report usage, Baton estimates about 4 characters per token and marks it "estimated". The UI shows:
+
+* tokens per relay-log step
+* per run: total, input vs. output, and a breakdown per provider
+* per history entry, plus a running total across all saved runs in the sidebar
+
+Failed calls (429, 503…) aren't counted, because providers don't bill them. Tokens spent on a reply Baton couldn't use (an unusable plan) are counted. The API returns `usage` in the orchestrate response, and each log entry carries `tokens`.
 
 ## History
 
@@ -32,13 +42,14 @@ Every prompt you send is saved, along with its result, relay log and generated f
 curl -s localhost:3000/api/orchestrate -H 'content-type: application/json' -d '{
   "userPrompt": "Create an Express.js authentication service with JWT and bcrypt",
   "taskType": "code",
-  "keys": { "groqApiKey": "gsk_...", "geminiApiKey": "AIza...", "openaiApiKey": "sk-..." }
+  "keys": { "groqApiKey": "gsk_...", "geminiApiKey": "AIza...", "nvidiaApiKey": "nvapi-...", "openaiApiKey": "sk-..." }
 }'
 ```
 
 * `taskType`: `code` (default), `document`, or `analysis`.
 * `keys`: at least one is required (BYOK). With only one key, Baton runs single-provider and loses failover.
-  * Order for building files: Groq → Gemini → OpenAI. Order for planning: Gemini → Groq → OpenAI.
+  * Order for building files: Groq → Gemini → NVIDIA NIM → OpenAI. Order for planning: Gemini → Groq → NVIDIA NIM → OpenAI.
+  * NVIDIA NIM (`integrate.api.nvidia.com`, keys from build.nvidia.com) uses `qwen/qwen2.5-coder-32b-instruct` for code and `meta/llama-3.3-70b-instruct` otherwise, each with a fallback model (override with `NVIDIA_CODE_MODELS` / `NVIDIA_GENERAL_MODELS`).
   * OpenAI has no free API tier, so its key needs billing. It is always tried last, so it only costs money when the free providers fail. Default models: `gpt-5-mini`, then `gpt-4.1-mini` (override with `OPENAI_MODELS`).
 * Returns the spec §4.1 payload. `status` is `success`, `partial` (some tasks failed on every provider), or `failed`.
 * Chit-chat and commands (`hi`, `thanks`, `help`, `status`, …) return `{"status":"gated", ...}` immediately. They need no keys and make no provider calls.

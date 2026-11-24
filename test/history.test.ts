@@ -80,7 +80,7 @@ test("every prompt is recorded: gated, missing keys, and planning failures (with
   assert.match(body.message, /openai: HTTP 429 account has no credit/);
   assert.match(body.message, /Gemini answered, but its plan wasn't usable/);
   assert.match(body.message, /OpenAI account has no credit; add a payment method/);
-  assert.match(body.message, /Tip: adding a Groq key/);
+  assert.match(body.message, /Tip: adding a Groq or NVIDIA NIM key/);
 
   const runs = (await app.inject({ method: "GET", url: "/api/history" })).json().runs;
   assert.deepEqual(runs.map((r: any) => r.status), ["error", "error", "gated"], "newest first");

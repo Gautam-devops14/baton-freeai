@@ -14,6 +14,20 @@ export interface BatonTask {
 
 export type LogEvent = "plan" | "execute" | "failover" | "complete";
 
+/** Tokens a provider call consumed. `estimated` when the provider didn't report usage. */
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimated?: boolean;
+}
+
+/** Token totals for one run: overall and per provider. */
+export interface RunUsage {
+  total: TokenUsage;
+  byProvider: Record<string, TokenUsage>;
+}
+
 export interface ExecutionLog {
   step: number;
   event: LogEvent;
@@ -21,6 +35,8 @@ export interface ExecutionLog {
   model: string;
   message: string;
   timestamp: string;
+  /** Tokens used by the call this entry describes (extension to the spec; omitted when no call was billed). */
+  tokens?: TokenUsage;
 }
 
 export interface BatonWorkspace {
@@ -44,6 +60,7 @@ export interface ProviderKeys {
   groqApiKey?: string;
   geminiApiKey?: string;
   openaiApiKey?: string;
+  nvidiaApiKey?: string;
 }
 
 export interface OrchestrateRequest {
@@ -65,6 +82,7 @@ export interface OrchestrateResponse {
   };
   artifacts: Record<string, string>;
   executionLogs: ExecutionLog[];
+  usage: RunUsage;
   downloadUrl: string;
 }
 
@@ -94,6 +112,8 @@ export interface ProviderTarget {
   unavailableModels?: Set<string>;
   /** False for providers/models that reject a custom temperature (e.g. OpenAI GPT-5). Default true. */
   sendTemperature?: boolean;
+  /** False for providers/models that reject `response_format: json_object`. Default true. */
+  supportsJsonMode?: boolean;
   baseUrl: string;
   apiKey: string;
 }

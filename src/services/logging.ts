@@ -1,5 +1,5 @@
 import type { SkippedModel } from "../providers/client.js";
-import type { BatonWorkspace, LogEvent, ProviderTarget } from "../types.js";
+import type { BatonWorkspace, ExecutionLog, LogEvent, ProviderTarget, RunUsage, TokenUsage } from "../types.js";
 
 export function log(
   ws: BatonWorkspace,
@@ -7,6 +7,7 @@ export function log(
   event: LogEvent,
   target: Pick<ProviderTarget, "provider" | "model">,
   message: string,
+  tokens?: TokenUsage,
 ): void {
   ws.executionLogs.push({
     step,
@@ -15,7 +16,28 @@ export function log(
     model: target.model,
     message,
     timestamp: new Date().toISOString(),
+    ...(tokens ? { tokens } : {}),
   });
+}
+
+const zero = (): TokenUsage => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+
+function add(into: TokenUsage, t: TokenUsage) {
+  into.promptTokens += t.promptTokens;
+  into.completionTokens += t.completionTokens;
+  into.totalTokens += t.totalTokens;
+  if (t.estimated) into.estimated = true;
+}
+
+/** Sum every billed call in a run's log: overall and per provider. */
+export function sumUsage(logs: ExecutionLog[]): RunUsage {
+  const usage: RunUsage = { total: zero(), byProvider: {} };
+  for (const l of logs) {
+    if (!l.tokens) continue;
+    add(usage.total, l.tokens);
+    add((usage.byProvider[l.provider] ??= zero()), l.tokens);
+  }
+  return usage;
 }
 
 /** Log each retired or overloaded model a provider stepped past before it answered or gave up. */

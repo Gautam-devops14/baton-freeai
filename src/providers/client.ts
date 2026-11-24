@@ -1,7 +1,7 @@
 // Unified OpenAI-compatible chat client (spec §5, guardrails 1 & 3).
 // One fetch helper for every provider; no vendor SDKs.
 
-import type { ChatMessage, ProviderTarget } from "../types.js";
+import type { ChatMessage, ProviderTarget, TokenUsage } from "../types.js";
 
 export const DEFAULT_TIMEOUT_MS = Number(process.env.BATON_PROVIDER_TIMEOUT_MS ?? 30_000);
 
@@ -112,6 +112,26 @@ export interface ChatResult {
   model: string;
   /** Models tried first and skipped (retired, or overloaded at the time). */
   skippedModels: SkippedModel[];
+  /** Tokens this successful call consumed (reported by the provider, or estimated). */
+  usage: TokenUsage;
+}
+
+/** Rough 4-chars-per-token estimate, used only when a provider omits `usage`. */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function readUsage(raw: unknown, messages: ChatMessage[], content: string): TokenUsage {
+  const u = (raw as { usage?: Record<string, unknown> } | undefined)?.usage;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
+  const prompt = num(u?.prompt_tokens);
+  const completion = num(u?.completion_tokens);
+  if (prompt !== undefined && completion !== undefined) {
+    return { promptTokens: prompt, completionTokens: completion, totalTokens: num(u?.total_tokens) ?? prompt + completion };
+  }
+  const p = estimateTokens(messages.map((m) => m.content).join("\n"));
+  const c = estimateTokens(content);
+  return { promptTokens: p, completionTokens: c, totalTokens: p + c, estimated: true };
 }
 
 /**
@@ -142,8 +162,8 @@ export async function chatCompletion(
     const overloaded: string[] = [];
     for (const [i, model] of candidates.entries()) {
       try {
-        const content = await requestOnce(target, model, messages, opts);
-        return { content, model, skippedModels };
+        const { content, usage } = await requestOnce(target, model, messages, opts);
+        return { content, model, skippedModels, usage };
       } catch (err) {
         if (!(err instanceof ProviderError)) throw err;
         if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
@@ -182,7 +202,7 @@ async function requestOnce(
   model: string,
   messages: ChatMessage[],
   opts: ChatOptions,
-): Promise<string> {
+): Promise<{ content: string; usage: TokenUsage }> {
   const url = `${target.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const body: Record<string, unknown> = {
     model,
@@ -190,7 +210,7 @@ async function requestOnce(
   };
   if (target.sendTemperature !== false) body.temperature = opts.temperature ?? 0.2;
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
-  if (opts.jsonMode) body.response_format = { type: "json_object" };
+  if (opts.jsonMode && target.supportsJsonMode !== false) body.response_format = { type: "json_object" };
 
   // The timer spans the whole exchange (headers AND body), so a provider that
   // stalls mid-stream still trips failover instead of hanging the request.
@@ -244,13 +264,17 @@ async function requestOnce(
   }
 
   let content: unknown;
+  let parsed: unknown;
   try {
-    content = JSON.parse(raw)?.choices?.[0]?.message?.content;
+    parsed = JSON.parse(raw);
+    content = (parsed as any)?.choices?.[0]?.message?.content;
   } catch {
     throw new ProviderError(`${target.provider} returned non-JSON body`, "bad_response", res.status);
   }
   if (typeof content !== "string" || content.trim() === "") {
     throw new ProviderError(`${target.provider} returned empty completion`, "bad_response", res.status);
   }
-  return content;
+  // Reasoning models (e.g. some NIM-hosted ones) prepend <think>…</think>; it's not part of the artifact.
+  const cleaned = content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, "");
+  return { content: cleaned || content, usage: readUsage(parsed, messages, content) };
 }

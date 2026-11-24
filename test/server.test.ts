@@ -218,7 +218,7 @@ test("Gemini-only and overloaded: retries once, then a clear 502 with a hint", a
   const msg = res.json().message;
   assert.match(msg, /google: HTTP 503 model overloaded/);
   assert.match(msg, /Gemini's servers are busy right now/);
-  assert.match(msg, /Tip: adding a Groq or OpenAI key/);
+  assert.match(msg, /Tip: adding a Groq, NVIDIA NIM or OpenAI key/);
   assert.equal(calls.length, 4, "2 models x 2 passes");
 });
 

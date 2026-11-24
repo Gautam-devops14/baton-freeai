@@ -26,7 +26,7 @@ const CANNED_COMMANDS: Record<string, string> = {
   reset: "Baton is stateless between requests; there is nothing to reset.",
   status: "Baton is online. POST a project description to /api/orchestrate to begin.",
   help:
-    'Send {"userPrompt": "...", "taskType": "code" | "document" | "analysis", "keys": {"groqApiKey": "...", "geminiApiKey": "...", "openaiApiKey": "..."}} ' +
+    'Send {"userPrompt": "...", "taskType": "code" | "document" | "analysis", "keys": {"groqApiKey": "...", "geminiApiKey": "...", "nvidiaApiKey": "...", "openaiApiKey": "..."}} ' +
     "to POST /api/orchestrate. Baton plans 2-4 artifacts, builds them across providers with automatic failover, " +
     "and returns a downloadUrl for a .zip of the results.",
 };

@@ -106,8 +106,10 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
   const attempts: PlanAttempt[] = [];
 
   for (const [i, target] of targets.entries()) {
+    // Kept outside `try` so tokens are still counted when the reply is an unusable plan.
+    let result: Awaited<ReturnType<typeof chatCompletion>> | undefined;
     try {
-      const result = await chatCompletion(target, messages, {
+      result = await chatCompletion(target, messages, {
         jsonMode: true,
         temperature: 0.1,
         retryOverloaded: i === targets.length - 1, // nobody left to hand off to: worth a short wait
@@ -116,7 +118,7 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
       const plan = parsePlan(result.content);
       ws.metadata = { ...ws.metadata, ...plan.metadata };
       ws.tasks = plan.tasks;
-      log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestones`);
+      log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestones`, result.usage);
       return;
     } catch (err) {
       lastError = err;
@@ -128,8 +130,9 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
         ws,
         0,
         "failover",
-        target,
+        { ...target, model: result?.model ?? target.model },
         next ? `${reason}; passing planning to ${next.provider}` : `${reason}; no planners left`,
+        result?.usage,
       );
     }
   }
@@ -142,7 +145,7 @@ export interface PlanAttempt {
   reason: string;
 }
 
-const PROVIDER_LABEL: Record<string, string> = { google: "Gemini", groq: "Groq", openai: "OpenAI" };
+const PROVIDER_LABEL: Record<string, string> = { google: "Gemini", groq: "Groq", openai: "OpenAI", nvidia: "NVIDIA NIM" };
 
 const HINTS: Record<string, (provider: string) => string> = {
   overloaded: (p) => `${p}'s servers are busy right now; this is usually temporary, so try again in a minute`,
@@ -170,10 +173,11 @@ export class PlanningError extends Error {
       .filter((h, i, all): h is string => Boolean(h) && all.indexOf(h) === i);
     const parts = [`Planning failed (${summary}).`];
     if (hints.length) parts.push(`What to do: ${hints.join("; ")}.`);
-    if (providerCount < 3) {
+    if (providerCount < 4) {
       const used = new Set(attempts.map((a) => a.provider));
-      const missing = ["groq", "google", "openai"].filter((p) => !used.has(p)).map(label);
-      if (missing.length) parts.push(`Tip: adding a ${missing.join(" or ")} key gives Baton more providers to fall back on.`);
+      const missing = ["groq", "google", "nvidia", "openai"].filter((p) => !used.has(p)).map(label);
+      const names = missing.length > 1 ? `${missing.slice(0, -1).join(", ")} or ${missing[missing.length - 1]}` : missing[0];
+      if (missing.length) parts.push(`Tip: adding a ${names} key gives Baton more providers to fall back on.`);
     }
     super(parts.join(" "));
     this.name = "PlanningError";

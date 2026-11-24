@@ -83,13 +83,20 @@ export const UI_HTML = /* html */ `<!doctype html>
   .actions { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; }
   .actions .linkbtn { color: var(--accent); }
   .actions .linkbtn.danger { color: var(--muted); }
+  .keys { grid-template-columns: 1fr; }
+  @media (min-width: 600px) { .keys { grid-template-columns: 1fr 1fr; } }
+  .tokens { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; margin-top: 12px; font-size: 14px; }
+  .tokens strong { font-variant-numeric: tabular-nums; }
+  .tokens .by { color: var(--muted); font-size: 13px; }
+  .tok { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .alltime { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <main>
   <h1>Baton</h1>
-  <p class="sub">Describe a project. Baton plans it, builds each file on Groq, and fails over to Gemini (then OpenAI, if you add a key) when a provider hits its limit.</p>
+  <p class="sub">Describe a project. Baton plans it, builds each file on Groq, and fails over to Gemini, NVIDIA NIM and then OpenAI (for whichever keys you add) when a provider hits its limit.</p>
 
   <div class="layout">
   <aside class="panel history" aria-label="Run history">
@@ -97,6 +104,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       <h2>History</h2>
       <button type="button" class="linkbtn" id="clearAll" hidden>Clear all</button>
     </div>
+    <p class="alltime" id="allTime" hidden></p>
     <p class="empty" id="historyEmpty">No runs yet. Every prompt you send, with its log and files, will be saved here.</p>
     <ul class="runs" id="runs"></ul>
   </aside>
@@ -117,7 +125,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       </div>
     </div>
 
-    <div class="row">
+    <div class="row keys">
       <div>
         <label for="groq">Groq API key</label>
         <input id="groq" type="password" autocomplete="off" placeholder="gsk_..." />
@@ -125,6 +133,10 @@ export const UI_HTML = /* html */ `<!doctype html>
       <div>
         <label for="gemini">Gemini API key</label>
         <input id="gemini" type="password" autocomplete="off" placeholder="AIza..." />
+      </div>
+      <div>
+        <label for="nvidia">NVIDIA NIM API key</label>
+        <input id="nvidia" type="password" autocomplete="off" placeholder="nvapi-..." />
       </div>
       <div>
         <label for="openai">OpenAI API key <span class="opt">(optional, paid)</span></label>
@@ -142,6 +154,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     <p class="meta" id="runMeta"></p>
     <div class="prompt-view" id="runPrompt"></div>
     <div class="summary" id="summary"></div>
+    <div class="tokens" id="runTokens" hidden></div>
     <div class="errbox" id="runError" hidden></div>
     <div class="actions">
       <button type="button" class="linkbtn" id="reuse">Use this prompt again</button>
@@ -175,6 +188,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     $("groq").value = store.get("baton.groq") || "";
     $("gemini").value = store.get("baton.gemini") || "";
     $("openai").value = store.get("baton.openai") || "";
+    $("nvidia").value = store.get("baton.nvidia") || "";
   }
 
   const el = (tag, props = {}, ...kids) => {
@@ -196,6 +210,10 @@ export const UI_HTML = /* html */ `<!doctype html>
     return new Date(iso).toLocaleDateString();
   }
 
+  const fmt = (n) => Math.round(n || 0).toLocaleString();
+  const short = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n || 0)));
+  const PROVIDER_LABEL = { groq: "Groq", google: "Gemini", nvidia: "NVIDIA NIM", openai: "OpenAI", baton: "Baton" };
+
   const STATUS_TEXT = { success: "success", partial: "partial", failed: "failed", error: "error", gated: "answered locally" };
 
   // ---------- history ----------
@@ -207,15 +225,19 @@ export const UI_HTML = /* html */ `<!doctype html>
       const res = await fetch("/api/history");
       if (res.ok) runs = (await res.json()).runs || [];
     } catch {}
+    const total = runs.reduce((sum, r) => sum + ((r.usage && r.usage.total.totalTokens) || 0), 0);
+    $("allTime").hidden = runs.length === 0;
+    $("allTime").textContent = fmt(total) + " tokens used across " + runs.length + " run" + (runs.length === 1 ? "" : "s");
     $("historyEmpty").hidden = runs.length > 0;
     $("clearAll").hidden = runs.length === 0;
     $("runs").replaceChildren(...runs.map((r) => {
       const files = r.artifactCount ? " · " + r.artifactCount + " file" + (r.artifactCount === 1 ? "" : "s") : "";
+      const toks = r.usage && r.usage.total.totalTokens ? " · " + short(r.usage.total.totalTokens) + " tok" : "";
       const btn = el("button", { type: "button", className: "run" + (current && current.id === r.id ? " active" : "") },
         el("span", { className: "p", textContent: r.userPrompt }),
         el("span", { className: "m" },
           el("span", { className: "dot " + r.status }),
-          el("span", { textContent: (STATUS_TEXT[r.status] || r.status) + " · " + ago(r.createdAt) + files })));
+          el("span", { textContent: (STATUS_TEXT[r.status] || r.status) + " · " + ago(r.createdAt) + files + toks })));
       btn.title = new Date(r.createdAt).toLocaleString();
       btn.dataset.id = r.id;
       btn.addEventListener("click", () => openRun(r.id));
@@ -261,6 +283,23 @@ export const UI_HTML = /* html */ `<!doctype html>
     const files = Object.keys(run.artifacts || {}).length;
     if (files && run.downloadUrl) summary.append(el("a", { className: "dl", href: run.downloadUrl, textContent: "Download .zip" }));
 
+    const u = run.usage;
+    const tokBox = $("runTokens");
+    if (run.status === "gated") {
+      tokBox.hidden = false;
+      tokBox.replaceChildren(el("span", {}, "Tokens: ", el("strong", { textContent: "0" })));
+    } else if (u && u.total) {
+      tokBox.hidden = false;
+      const by = Object.entries(u.byProvider || {}).map(([p, t]) => (PROVIDER_LABEL[p] || p) + " " + fmt(t.totalTokens)).join(" · ");
+      tokBox.replaceChildren(
+        el("span", {}, "Tokens: ", el("strong", { textContent: fmt(u.total.totalTokens) })),
+        el("span", { className: "by", textContent: fmt(u.total.promptTokens) + " in · " + fmt(u.total.completionTokens) + " out" + (u.total.estimated ? " · some estimated" : "") }),
+        ...(by ? [el("span", { className: "by", textContent: by })] : []),
+      );
+    } else {
+      tokBox.hidden = true;
+    }
+
     const isErr = run.status === "error";
     $("runError").hidden = !isErr;
     $("runError").textContent = isErr ? run.message || "Something went wrong." : "";
@@ -272,6 +311,7 @@ export const UI_HTML = /* html */ `<!doctype html>
         el("span", { className: "ev " + l.event, textContent: l.event }), " ",
         l.message, " ",
         el("span", { className: "meta", textContent: "(" + l.provider + " / " + l.model + ")" }),
+        ...(l.tokens ? [" ", el("span", { className: "tok", textContent: "· " + fmt(l.tokens.totalTokens) + " tokens" + (l.tokens.estimated ? " (est.)" : "") })] : []),
       )));
 
     const entries = Object.entries(run.artifacts || {});
@@ -314,6 +354,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     store.set("baton.groq", remember ? $("groq").value : null);
     store.set("baton.gemini", remember ? $("gemini").value : null);
     store.set("baton.openai", remember ? $("openai").value : null);
+    store.set("baton.nvidia", remember ? $("nvidia").value : null);
 
     $("go").disabled = true;
     setStatus("Planning and building. This can take a minute…");
@@ -330,12 +371,13 @@ export const UI_HTML = /* html */ `<!doctype html>
             groqApiKey: $("groq").value.trim() || undefined,
             geminiApiKey: $("gemini").value.trim() || undefined,
             openaiApiKey: $("openai").value.trim() || undefined,
+            nvidiaApiKey: $("nvidia").value.trim() || undefined,
           },
         }),
       });
       let data = {};
       try { data = await res.json(); } catch {}
-      setStatus(data.error === "missing_keys" ? "Add at least one API key (Groq, Gemini or OpenAI) to run a project." : "", data.error === "missing_keys");
+      setStatus(data.error === "missing_keys" ? "Add at least one API key (Groq, Gemini, NVIDIA NIM or OpenAI) to run a project." : "", data.error === "missing_keys");
       await loadHistory();
       if (data.historyId) {
         await openRun(data.historyId);
