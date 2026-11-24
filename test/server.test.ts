@@ -62,14 +62,19 @@ test("full relay: Groq sprint, 429 failover to Gemini with full context, zip dow
   assert.deepEqual(events, [
     "0:plan:google",
     "1:execute:groq",
+    // Step 2: every Groq model is rate limited (gpt-oss, llama-3.3, llama-3.1), then Baton leaves Groq.
+    "2:failover:groq",
+    "2:failover:groq",
+    "2:failover:groq",
     "2:failover:groq",
     "2:execute:google",
-    // Groq is cooling down after the 429, so task 3 goes straight to Gemini.
+    // Groq is cooling down after the 429s, so task 3 goes straight to Gemini.
     "3:execute:google",
     "4:complete:baton",
   ]);
-  assert.match(out.executionLogs[2].message, /HTTP 429 rate limit detected; passing baton to Google AI Studio/);
-  assert.equal(groqCalls, 2);
+  assert.ok(out.executionLogs.some((l: any) => /HTTP 429 rate limit detected; passing baton to Google AI Studio/.test(l.message)));
+  assert.deepEqual(out.calls.filter((c: any) => c.step === 2 && c.provider === "groq").map((c: any) => c.model),
+    ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]);
 
   // Context preservation: Gemini sees Groq's earlier output via the workspace.
   assert.match(geminiPrompts[0], /=== package\.json === \(written by groq\/openai\/gpt-oss-120b\)\n\{"name": "auth"\}/);
@@ -92,7 +97,10 @@ test("planner falls back to Groq when Gemini is rate limited", async () => {
   });
   const out = res.json();
   assert.equal(out.status, "success");
-  assert.deepEqual(out.executionLogs.slice(0, 2).map((l: any) => `${l.event}:${l.provider}`), ["failover:google", "plan:groq"]);
+  assert.equal(out.executionLogs.find((l: any) => l.event === "plan").provider, "groq");
+  assert.ok(out.executionLogs.some((l: any) => l.provider === "google" && /passing planning to groq/.test(l.message)));
+  assert.deepEqual(calls.filter((c) => c.url.includes("generativelanguage") && c.url.endsWith("/chat/completions")).map((c) => c.model),
+    ["gemini-3.8-flash", "gemini-3.5-flash-lite"], "both Gemini models tried before leaving Gemini");
 });
 
 test("reports partial status when every provider fails a task", async () => {
@@ -202,7 +210,7 @@ test("Gemini overloaded with both keys: planner hands off to Groq at once, witho
     assert.ok(Date.now() - t0 < 2000, "no overload wait when another provider is available");
     assert.equal(out.status, "success");
     assert.equal(out.executionLogs.find((l: any) => l.event === "plan").provider, "groq");
-    assert.equal(calls.filter((c) => isGemini(c.url)).length, 2, "both Gemini models tried once");
+    assert.equal(calls.filter((c) => isGemini(c.url) && c.url.endsWith("/chat/completions")).length, 2, "both Gemini models tried once");
   } finally {
     process.env.BATON_OVERLOAD_RETRY_MS = "0";
   }
@@ -219,7 +227,7 @@ test("Gemini-only and overloaded: retries once, then a clear 502 with a hint", a
   assert.match(msg, /google: HTTP 503 model overloaded/);
   assert.match(msg, /Gemini's servers are busy right now/);
   assert.match(msg, /Tip: adding a Groq, NVIDIA NIM, OpenRouter or OpenAI key/);
-  assert.equal(calls.length, 4, "2 models x 2 passes");
+  assert.equal(calls.filter((c) => c.url.endsWith("/chat/completions")).length, 4, "2 models x 2 passes");
 });
 
 test("Gemini-only: overloaded first, recovers on the retry pass", async () => {
@@ -270,10 +278,12 @@ test("OpenAI only used after Groq and Gemini both fail", async () => {
     payload: { userPrompt: "Build an auth service", keys: { ...KEYS, openaiApiKey: "sk-test" } },
   })).json();
   assert.equal(out.status, "success");
-  assert.deepEqual(out.executionLogs.filter((l: any) => l.step === 1).map((l: any) => `${l.event}:${l.provider}`), [
+  // Each provider's models are all tried before moving on; the provider-level hand-offs are in order.
+  const step1 = out.executionLogs.filter((l: any) => l.step === 1);
+  assert.deepEqual(step1.filter((l: any) => /passing baton/.test(l.message) || l.event === "execute").map((l: any) => `${l.event}:${l.provider}`), [
     "failover:groq", "failover:google", "execute:openai",
   ]);
-  assert.match(out.executionLogs.find((l: any) => l.step === 1 && l.provider === "google").message, /passing baton to OpenAI/);
+  assert.ok(out.executionLogs.some((l: any) => l.step === 1 && l.provider === "google" && /passing baton to OpenAI/.test(l.message)));
   assert.equal(out.artifacts["package.json"], "from openai\n");
 });
 

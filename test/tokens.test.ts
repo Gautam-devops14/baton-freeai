@@ -26,10 +26,10 @@ test("NVIDIA NIM: free tier sits after Groq/Gemini and before paid OpenAI", () =
   assert.deepEqual(t.relay.map((x) => x.provider), ["groq", "google", "nvidia", "openai"]);
   const nv = t.relay[2];
   assert.equal(nv.baseUrl, "https://integrate.api.nvidia.com/v1");
-  assert.equal(nv.model, "moonshotai/kimi-k2-instruct");
-  assert.deepEqual(nv.fallbackModels, ["deepseek-ai/deepseek-v3.1"]);
+  assert.equal(nv.model, "nvidia/nemotron-3-ultra-550b-a55b");
+  assert.deepEqual(nv.fallbackModels, ["nvidia/nemotron-3.5-lightning-30b-a3b", "deepseek-ai/deepseek-v4.1-flash"]);
   const doc = buildTargets({ nvidiaApiKey: "n" }, "document").relay[0];
-  assert.equal(doc.model, "deepseek-ai/deepseek-v3.1");
+  assert.equal(doc.model, "nvidia/nemotron-3.5-lightning-30b-a3b");
 });
 
 test("NVIDIA: never sends response_format (not all NIM models accept it)", async () => {

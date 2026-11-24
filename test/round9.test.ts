@@ -64,16 +64,14 @@ test("the user's run: NVIDIA retired, Groq briefly rate limited, others down -> 
   assert.ok(!out.calls.some((c: any) => c.model === "bigcode/starcoder2-15b"));
   assert.equal(msgs.filter((m: string) => m.includes("|skipped: nvidia: none of its models are available")).length, 1, msgs.join("\n"));
   assert.ok(!msgs.some((m: string) => /^[123]\|nvidia\/.*passing baton/.test(m)), "no fake per-step NVIDIA failovers");
-  // Groq's short rate limit: Baton waited and retried instead of failing cart.html.
-  assert.ok(msgs.some((m: string) => /^3\|groq\/.*\|waiting 0\.\ds for groq's rate limit to reset, then retrying$/.test(m)), msgs.join("\n"));
-  assert.ok(msgs.some((m: string) => m.startsWith("3|groq/openai/gpt-oss-120b|Generated cart.html successfully")));
-  // Labels name the model that actually failed (the Gemini lite model, not the first one).
-  assert.ok(msgs.some((m: string) => m.startsWith("3|google/gemini-3.5-flash-lite|HTTP 503")), msgs.join("\n"));
-  // Rejected key, no credit and no models are remembered as skips, with reasons.
+  // Groq's rate limit was on gpt-oss-120b only: Groq's next model built cart.html straight away.
+  assert.ok(msgs.some((m: string) => m.startsWith("3|groq/openai/gpt-oss-120b|HTTP 429 rate limit detected; retrying with llama-3.3-70b-versatile")), msgs.join("\n"));
+  assert.ok(msgs.some((m: string) => m.startsWith("3|groq/llama-3.3-70b-versatile|Generated cart.html successfully")));
+  assert.ok(!out.calls.some((c: any) => c.step === 3 && c.provider !== "groq"), "no detour to slower providers");
+  // NVIDIA (no working models) is remembered as a skip, with the reason. OpenRouter and OpenAI were never needed.
   const reasons = Object.fromEntries(snapshotMemory().busyProviders.map((b) => [b.provider, b.reason]));
-  assert.match(reasons.openrouter, /API key was rejected/);
-  assert.match(reasons.openai, /no credit/);
   assert.match(reasons.nvidia, /none of its models/);
+  assert.equal(reasons.openrouter, undefined);
 });
 
 test("Groq's 'Please try again in Xs' text is read as the retry time when there is no Retry-After header", async () => {
@@ -93,7 +91,7 @@ test("a rejected key skips that provider in later runs (10 min) until the key ch
 test("POST /api/keys/test checks each key without spending tokens", async () => {
   installFetch(({ url }) => {
     if (url.includes("openrouter.ai") && url.endsWith("/key")) return new Response('{"error":{"message":"Missing Authentication header","code":401}}', { status: 401 });
-    if (url.includes("nvidia")) return new Response(JSON.stringify({ data: [{ id: "deepseek-ai/deepseek-v3.1" }, { id: "bigcode/starcoder2-15b" }] }));
+    if (url.includes("nvidia")) return new Response(JSON.stringify({ data: [{ id: "deepseek-ai/deepseek-v4.1-flash" }, { id: "bigcode/starcoder2-15b" }] }));
     if (url.includes("groq")) return new Response(JSON.stringify({ data: [{ id: "openai/gpt-oss-120b" }, { id: "whisper-large-v3" }] }));
     return new Response('{"error":{"message":"API key not valid"}}', { status: 400 });
   });
@@ -104,7 +102,7 @@ test("POST /api/keys/test checks each key without spending tokens", async () => 
   assert.deepEqual(r.groq.configuredAvailable, ["openai/gpt-oss-120b"]);
   assert.ok(r.groq.missing.includes("llama-3.3-70b-versatile"));
   assert.equal(r.nvidia.ok, true);
-  assert.deepEqual(r.nvidia.configuredAvailable, ["deepseek-ai/deepseek-v3.1"]);
+  assert.deepEqual(r.nvidia.configuredAvailable, ["deepseek-ai/deepseek-v4.1-flash"]);
   assert.equal(r.google.ok, false);
   assert.equal(r.openrouter.ok, false);
   assert.match(r.openrouter.message, /401/);

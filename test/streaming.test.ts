@@ -20,7 +20,8 @@ function sse(chunks: Array<object | string>, opts: { delayMs?: number; stallAfte
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 const delta = (content: string) => ({ choices: [{ delta: { content } }] });
-const groq = () => buildTargets({ groqApiKey: "g" }, "code").relay[0];
+/** One model, no fallbacks or discovery: these tests are about a single streamed HTTP call. */
+const groq = () => ({ provider: "groq", model: "m", baseUrl: "https://api.groq.com/openai/v1", apiKey: "g" });
 
 test("streams the reply: joins deltas, reads usage from the final chunk, requests stream + usage", async () => {
   let sent: any;
@@ -97,7 +98,7 @@ test("models picked by discovery get a shorter first-chunk timeout", async () =>
       return new Response('{"error":{"message":"model does not exist"}}', { status: 404 });
     });
     const t0 = Date.now();
-    await assert.rejects(chatCompletion(groq(), []));
+    await assert.rejects(chatCompletion(buildTargets({ groqApiKey: "g" }, "code").relay[0], []));
     assert.ok(Date.now() - t0 < 2000, "gave up on the unknown model quickly (not the 30s default)");
     assert.ok(calls.some((c) => c.model === "new-coder-instruct"));
   } finally {

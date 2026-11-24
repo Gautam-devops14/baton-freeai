@@ -178,7 +178,7 @@ test("follow-up: edits the existing project with full context, keeps untouched f
   const appStep = prompts.task.find((p) => p.includes("Produce the full contents of `app.js`"))!;
   assert.match(appStep, /## Earlier requests \(oldest first\)\n1\. Student marks app\n\n## Current request\nadd a logo and a delete button/);
   assert.match(appStep, /## Current contents of `app\.js` \(rewrite the WHOLE file/);
-  assert.match(appStep, /=== index\.html === \(written by nvidia\/moonshotai\/kimi-k2-instruct\)/);
+  assert.match(appStep, /=== index\.html === \(written by nvidia\/nvidia\/nemotron-3-ultra-550b-a55b\)/);
 
   // Result: full merged project; logo.png planned as SVG; changes reported.
   assert.deepEqual(Object.keys(second.artifacts).sort(), ["app.js", "index.html", "logo.svg"]);
@@ -215,9 +215,11 @@ test("follow-up to a missing or file-less run -> 404 with a clear message", asyn
 test("each step records what it was given: files with who wrote them, decisions, prompt size and exact prompt", async () => {
   let n = 0;
   installFetch(({ url, body }) => {
+    if (url.endsWith("/models")) return new Response('{"data":[]}');
     if (isPlanner(body)) return reply(FIRST_PLAN);
     n++;
-    if (host(url).includes("nvidia") && n === 2) return new Response("{}", { status: 429 }); // app.js fails over to Groq
+    const forAppJs = body.messages[1].content.includes("Produce the full contents of `app.js`");
+    if (host(url).includes("nvidia") && forAppJs) return new Response("{}", { status: 429 }); // every NVIDIA model limited for app.js
     return reply(`content ${n}`);
   });
   const out = (await withEnv({ BATON_RELAY_ORDER: "nvidia,groq" }, () => server().inject({
@@ -229,10 +231,12 @@ test("each step records what it was given: files with who wrote them, decisions,
   assert.deepEqual(step1.files, []);
   assert.equal(step2.target, "app.js");
   assert.deepEqual(step2.decisions, { framework: "vanilla" });
-  assert.deepEqual(step2.files.map((f: any) => [f.path, f.source, f.by]), [["index.html", "this-run", "nvidia/moonshotai/kimi-k2-instruct"]]);
+  assert.deepEqual(step2.files.map((f: any) => [f.path, f.source, f.by]), [["index.html", "this-run", "nvidia/nvidia/nemotron-3-ultra-550b-a55b"]]);
   assert.ok(step2.promptTokens > 0);
   assert.match(step2.messages[1].content, /=== index\.html === \(written by nvidia\//);
   // The same context went to Groq after NVIDIA failed: the log shows both attempts for step 2.
-  assert.deepEqual(out.executionLogs.filter((l: any) => l.step === 2).map((l: any) => `${l.event}:${l.provider}`), ["failover:nvidia", "execute:groq"]);
+  const step2Logs = out.executionLogs.filter((l: any) => l.step === 2);
+  assert.ok(step2Logs.slice(0, -1).every((l: any) => l.event === "failover" && l.provider === "nvidia"), "all NVIDIA models tried first");
+  assert.equal(`${step2Logs.at(-1).event}:${step2Logs.at(-1).provider}`, "execute:groq");
   assert.equal(out.artifactOrigins["app.js"].provider, "groq");
 });

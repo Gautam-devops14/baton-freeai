@@ -20,6 +20,9 @@ export interface TokenUsage {
   completionTokens: number;
   totalTokens: number;
   estimated?: boolean;
+  /** Hidden "thinking" tokens inside completionTokens, when the provider reports them (or estimated from reasoning text). */
+  reasoningTokens?: number;
+  reasoningEstimated?: boolean;
 }
 
 /** Aggregated usage also counts how many billed calls produced it. */

@@ -12,14 +12,15 @@ const reply = (content: string) =>
   new Response(JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
 const isPlanner = (body: any) => body.messages?.[0]?.content?.includes("Task Architect");
 
-test("a short Groq rate limit is waited out immediately instead of detouring through slower providers", async () => {
+test("when every Groq model is briefly rate limited, Baton waits it out instead of detouring through slower providers", async () => {
   process.env.BATON_SHORT_RATE_WAIT_MS = "8000";
   let groqBuild = 0;
   installFetch(({ url, body }) => {
+    if (url.endsWith("/models")) return new Response('{"data":[]}');
     if (url.includes("groq")) {
       if (isPlanner(body)) return reply('{"tasks":[{"title":"Page","targetArtifact":"index.html"}]}');
-      return ++groqBuild === 1
-        ? new Response('{"error":{"message":"Rate limit reached for model openai/gpt-oss-120b. Please try again in 0.2s."}}', { status: 429 })
+      return ++groqBuild <= 3 // all three Groq models limited for a moment
+        ? new Response('{"error":{"message":"Rate limit reached. Please try again in 0.2s."}}', { status: 429 })
         : reply("<h1>ok</h1>");
     }
     return reply("from a slower provider");

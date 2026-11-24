@@ -60,6 +60,7 @@ test("HTTP 404 on the first model retries with the next model", async () => {
       model: "gemini-3.8-flash",
       reason: "HTTP 404 model unavailable: This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash",
       next: "gemini-3.5-flash-lite",
+      nextDiscovered: false,
     },
   ]);
 });
@@ -72,10 +73,9 @@ test("'no longer available' on a 400 also retries with the next model", async ()
   assert.equal((await chatCompletion(gemini(), [])).model, "gemini-3.5-flash-lite");
 });
 
-test("a plain 400 (not a missing model) does not trigger a model swap", async () => {
-  installFetch(() => new Response('{"error":{"message":"Invalid JSON payload"}}', { status: 400 }));
-  await assert.rejects(chatCompletion(gemini(), []), (e: ProviderError) => e.kind === "client");
-  assert.equal(calls.length, 1);
+test("a 400 on one model tries the provider's next model (it may be model-specific, e.g. context too long)", async () => {
+  installFetch(({ model }) => (model === "gemini-3.8-flash" ? new Response('{"error":{"message":"context length exceeded"}}', { status: 400 }) : completion("ok")));
+  assert.equal((await chatCompletion(gemini(), [])).model, "gemini-3.5-flash-lite");
 });
 
 test("when every model is gone, throws model_unavailable with the full swap history", async () => {
@@ -87,9 +87,22 @@ test("when every model is gone, throws model_unavailable with the full swap hist
   assert.deepEqual(calls.map((c) => c.model), ["gemini-3.8-flash", "gemini-3.5-flash-lite"]);
 });
 
-test("a 429 on the first model does NOT try the next model (provider failover handles it)", async () => {
-  installFetch(() => rateLimited());
-  await assert.rejects(chatCompletion(gemini(), []), (e: ProviderError) => e.kind === "rate_limit");
+test("a 429 on one model tries the provider's next model (limits are per model)", async () => {
+  installFetch(({ model }) => (model === "gemini-3.8-flash" ? rateLimited() : completion("from lite")));
+  const r = await chatCompletion(gemini(), []);
+  assert.equal(r.model, "gemini-3.5-flash-lite");
+  assert.match(r.skippedModels[0].reason, /429 rate limit/);
+});
+
+test("every model rate limited -> one rate_limit error with the soonest reset, after trying them all", async () => {
+  installFetch(({ model }) => new Response('{"error":{"message":"Rate limit reached"}}', { status: 429, headers: { "retry-after": model === "gemini-3.8-flash" ? "9" : "3" } }));
+  await assert.rejects(chatCompletion(gemini(), []), (e: ProviderError) => e.kind === "rate_limit" && e.retryAfterMs === 3000);
+  assert.deepEqual(calls.map((c) => c.model), ["gemini-3.8-flash", "gemini-3.5-flash-lite"]);
+});
+
+test("account-level problems (key rejected) stop at the first model: other models wouldn't help", async () => {
+  installFetch(() => new Response('{"error":{"message":"Invalid API Key"}}', { status: 401 }));
+  await assert.rejects(chatCompletion(gemini(), []), (e: ProviderError) => e.kind === "auth");
   assert.equal(calls.length, 1);
 });
 

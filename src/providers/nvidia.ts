@@ -16,9 +16,19 @@ const list = (env: string | undefined, fallback: string[]) => {
  * list. Override with NVIDIA_CODE_MODELS / NVIDIA_GENERAL_MODELS.
  */
 export const NVIDIA_MODELS = {
-  // qwen3-coder-480b (EOL 2026-06-11) and gpt-oss-120b (EOL 2026-09-03) are retired on NVIDIA.
-  code: list(process.env.NVIDIA_CODE_MODELS, ["moonshotai/kimi-k2-instruct", "deepseek-ai/deepseek-v3.1"]),
-  general: list(process.env.NVIDIA_GENERAL_MODELS, ["deepseek-ai/deepseek-v3.1", "moonshotai/kimi-k2-instruct"]),
+  // From NVIDIA's current catalogue (build.nvidia.com). The older qwen3-coder, gpt-oss-120b,
+  // kimi-k2 and deepseek-v3.1 IDs are retired or not served. Check each model page's
+  // example code for the exact ID if one answers 404.
+  code: list(process.env.NVIDIA_CODE_MODELS, [
+    "nvidia/nemotron-3-ultra-550b-a55b", // strongest for coding/planning (large, may be slower)
+    "nvidia/nemotron-3.5-lightning-30b-a3b", // fast
+    "deepseek-ai/deepseek-v4.1-flash",
+  ]),
+  general: list(process.env.NVIDIA_GENERAL_MODELS, [
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "deepseek-ai/deepseek-v4.1-flash",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+  ]),
 };
 
 export function nvidiaTarget(apiKey: string, taskType: TaskType): ProviderTarget {
@@ -35,10 +45,10 @@ export function nvidiaTarget(apiKey: string, taskType: TaskType): ProviderTarget
     streamUsage: false, // not every NIM accepts stream_options; tokens are estimated instead
     // Discovery only considers chat/instruct models: NVIDIA also lists code-completion
     // models (e.g. starcoder2) that its chat endpoint answers with 404.
-    modelFilter: /instruct|chat|kimi|deepseek|qwen3|gpt-oss|nemotron|mistral|mixtral|llama-4/i,
+    modelFilter: /instruct|chat|kimi|deepseek|qwen3|gpt-oss|nemotron|mistral|mixtral|llama-4/i, // "-vl" (image) models are excluded by discovery's non-chat list
     modelHints:
       taskType === "code"
-        ? [/qwen3?-coder.*instruct/, /deepseek-v3/, /kimi/, /gpt-oss/, /llama-4/, /nemotron.*(super|ultra)/, /70b.*instruct/, /instruct/]
-        : [/deepseek-v3/, /kimi/, /gpt-oss/, /llama-4/, /nemotron.*(super|ultra)/, /70b.*instruct/, /instruct/],
+        ? [/nemotron-3.*ultra/, /qwen3?-coder.*instruct/, /deepseek-v4/, /nemotron.*lightning/, /deepseek-v3/, /kimi/, /gpt-oss/, /llama-4/, /nemotron.*(super|ultra)/, /70b.*instruct/, /instruct/]
+        : [/nemotron.*lightning/, /deepseek-v4/, /nemotron-3.*ultra/, /deepseek-v3/, /kimi/, /gpt-oss/, /llama-4/, /nemotron.*(super|ultra)/, /70b.*instruct/, /instruct/],
   };
 }

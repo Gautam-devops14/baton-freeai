@@ -38,7 +38,9 @@ test("every provider call is traced on the run (status, latency, tokens) and in 
   const app = server();
   const out = (await post(app, { userPrompt: "Build an app", keys: { groqApiKey: "g", geminiApiKey: "m" } })).json();
   const calls = out.calls.map((c: any) => `${c.step}:${c.provider}:${c.status}:${c.outcome}`);
-  assert.deepEqual(calls, ["0:google:200:ok", "1:groq:429:rate_limit", "1:google:200:ok", "2:google:200:ok"]);
+  // gpt-oss-120b's 429 is per model: Groq's next model (llama-3.3-70b) takes over before Baton leaves Groq.
+  assert.deepEqual(calls, ["0:google:200:ok", "1:groq:429:rate_limit", "1:groq:200:ok", "2:groq:200:ok"]);
+  assert.deepEqual(out.calls.slice(1, 3).map((c: any) => c.model), ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"]);
   assert.ok(out.calls.every((c: any) => typeof c.latencyMs === "number" && c.host && c.runId === out.historyId));
   assert.equal(out.calls[0].tokens.totalTokens, 20);
 

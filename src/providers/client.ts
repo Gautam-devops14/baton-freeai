@@ -46,6 +46,8 @@ export class ProviderError extends Error {
 
   /** The model whose call raised this error (set by the client). */
   model?: string;
+  /** The problem affects the whole account (e.g. a daily cap), so other models won't help. */
+  accountLevel?: boolean;
 
   /** Short human-readable reason used in execution logs. */
   get reason(): string {
@@ -112,6 +114,7 @@ const noModelsSkipMs = () => Number(process.env.BATON_NO_MODELS_SKIP_MS ?? 3600_
 function withHistory(err: ProviderError, skipped: SkippedModel[]): ProviderError {
   const e = new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skipped, err.detail);
   e.model = err.model;
+  e.accountLevel = err.accountLevel;
   return e;
 }
 
@@ -185,6 +188,8 @@ export interface ChatResult {
   skippedModels: SkippedModel[];
   /** Tokens this successful call consumed (reported by the provider, or estimated). */
   usage: TokenUsage;
+  /** Characters of hidden reasoning the model streamed or wrapped in <think> (for the token breakdown). */
+  reasoningChars?: number;
 }
 
 /** Rough 4-chars-per-token estimate, used only when a provider omits `usage`. */
@@ -197,24 +202,40 @@ function readUsage(raw: unknown, messages: ChatMessage[], content: string): Toke
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
   const prompt = num(u?.prompt_tokens);
   const completion = num(u?.completion_tokens);
+  const details = (u?.completion_tokens_details ?? u?.output_tokens_details) as Record<string, unknown> | undefined;
+  const reasoning = num(details?.reasoning_tokens) ?? num(u?.reasoning_tokens);
   if (prompt !== undefined && completion !== undefined) {
-    return { promptTokens: prompt, completionTokens: completion, totalTokens: num(u?.total_tokens) ?? prompt + completion };
+    return {
+      promptTokens: prompt,
+      completionTokens: completion,
+      totalTokens: num(u?.total_tokens) ?? prompt + completion,
+      ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
+    };
   }
   const p = estimateTokens(messages.map((m) => m.content).join("\n"));
   const c = estimateTokens(content);
   return { promptTokens: p, completionTokens: c, totalTokens: p + c, estimated: true };
 }
 
+/** Problems with the whole account or provider: no other model of this provider will help. */
+export function isAccountLevel(err: ProviderError): boolean {
+  return err.kind === "auth" || err.kind === "billing" || err.kind === "network" || err.accountLevel === true;
+}
+
+/** When every model failed, report the most actionable reason (a rate limit can be waited out; a retirement can't). */
+const KIND_PRIORITY: ProviderErrorKind[] = ["rate_limit", "overloaded", "timeout", "server", "bad_response", "client", "model_unavailable"];
+
 /**
- * Send a chat request, walking the target's model list: `target.model` first,
- * then each of `target.fallbackModels`.
- *  - Retired model (404 / "no longer available"): skip to the next model and
- *    remember it on the target so later calls in this run don't retry it.
- *  - Overloaded model (503 / "high demand"): skip to the next model, which
- *    usually has separate capacity. Not remembered: the spike is temporary.
- *    With `retryOverloaded`, overloaded models get one more pass after a pause.
- *  - Anything else (429, timeout, auth...): throw at once so the relay can fail
- *    over to a different provider.
+ * Send a chat request, trying EVERY model this provider has before giving up on it:
+ * the configured list (`target.model`, then `target.fallbackModels`), then models
+ * discovered from the provider's live list (once per run).
+ *  - Model-level problems (rate limit, overloaded, timeout, retired/not found,
+ *    bad or empty reply, 4xx/5xx) -> try the provider's next model. Limits are
+ *    usually per model, so another model often still works.
+ *  - Account-level problems (key rejected, no credit, daily cap, host unreachable)
+ *    -> throw at once: no other model of this provider would help.
+ *  - Retired models are remembered (this run and later runs). With
+ *    `retryOverloaded`, overloaded models get one more pass after a pause.
  */
 export async function chatCompletion(
   target: ProviderTarget,
@@ -226,88 +247,88 @@ export async function chatCompletion(
   // discovered in an earlier run is tried after any configured model still alive.
   for (const m of [target.model, ...(target.fallbackModels ?? [])]) if (isModelDead(target, m)) unavailable.add(m);
   const remembered = getDiscoveredModel(target);
-  let candidates = [target.model, ...(target.fallbackModels ?? []), ...(remembered ? [remembered] : [])].filter(
+  const configured = [target.model, ...(target.fallbackModels ?? []), ...(remembered ? [remembered] : [])].filter(
     (m, i, all) => all.indexOf(m) === i && !unavailable.has(m),
   );
   const skippedModels: SkippedModel[] = [];
-  let lastError: ProviderError | undefined;
-  const maxPasses = opts.retryOverloaded ? 2 : 1;
+  const failures: Array<{ model: string; err: ProviderError }> = [];
+  const tried = new Set<string>();
 
-  for (let pass = 1; pass <= maxPasses && candidates.length > 0; pass++) {
-    const overloaded: string[] = [];
-    for (const [i, model] of candidates.entries()) {
+  /** Try each model in order; returns the first success, or undefined if all failed at model level. */
+  const tryModels = async (models: string[], callOpts: ChatOptions, discovered: boolean): Promise<ChatResult | undefined> => {
+    for (const [i, model] of models.entries()) {
+      tried.add(model);
       try {
-        const { content, usage } = await requestOnce(target, model, messages, opts);
+        const { content, usage, reasoningChars } = await requestOnce(target, model, messages, callOpts);
+        if (discovered) {
+          target.fallbackModels = [...(target.fallbackModels ?? []), model]; // reuse it for the rest of the run
+          rememberDiscoveredModel(target, model); // ...and in later runs
+        }
         clearProviderBusy(target);
-        return { content, model, skippedModels, usage };
+        return { content, model, skippedModels, usage, reasoningChars };
       } catch (err) {
         if (!(err instanceof ProviderError)) throw err;
-        if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
-          // e.g. the fallback model is rate limited: surface it, but keep the swap history.
-          throw withHistory(err, skippedModels);
-        }
+        if (isAccountLevel(err)) throw withHistory(err, skippedModels);
         if (err.kind === "model_unavailable") {
           unavailable.add(model);
           markModelDead(target, model);
-        } else overloaded.push(model);
-        skippedModels.push({ model, reason: err.reason, next: candidates[i + 1] });
-        lastError = err;
+        }
+        failures.push({ model, err });
+        skippedModels.push({ model, reason: err.reason, next: models[i + 1], nextDiscovered: discovered && Boolean(models[i + 1]) });
       }
     }
+    return undefined;
+  };
 
-    if (overloaded.length === 0 || pass === maxPasses) break;
+  // 1. Every configured model.
+  let result = await tryModels(configured, opts, false);
+  if (result) return result;
+
+  // 2. Overloaded models get one more pass after a pause (last provider in the waterfall only).
+  const overloaded = failures.filter((f) => f.err.kind === "overloaded").map((f) => f.model);
+  if (opts.retryOverloaded && overloaded.length && skippedModels.length) {
     const delay = overloadRetryDelayMs();
-    Object.assign(skippedModels[skippedModels.length - 1], { next: overloaded[0], afterMs: delay });
+    Object.assign(skippedModels[skippedModels.length - 1], { next: overloaded[0], afterMs: delay, nextDiscovered: false });
     await sleep(delay);
-    candidates = overloaded;
+    result = await tryModels(overloaded, opts, false);
+    if (result) return result;
   }
 
-  // Every configured model is retired: ask the provider what it serves today (once per run).
-  if (lastError?.kind === "model_unavailable" && target.modelHints && !target.discoveryTried) {
+  // 3. Models discovered from the provider's live list (once per run), for any model-level failure.
+  if (target.modelHints && !target.discoveryTried) {
     target.discoveryTried = true;
     const live = (await listModels(target)).filter((id) => !target.modelFilter || target.modelFilter.test(id));
-    const found = rankModels(live, target.modelHints, unavailable, 5);
+    const found = rankModels(live, target.modelHints, new Set([...unavailable, ...tried]), 5);
     if (found.length && skippedModels.length) {
       Object.assign(skippedModels[skippedModels.length - 1], { next: found[0], nextDiscovered: true });
     }
     const discoveredOpts = { ...opts, timeoutMs: Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, discoveredTimeoutMs()) };
-    for (const [i, model] of found.entries()) {
-      try {
-        const { content, usage } = await requestOnce(target, model, messages, discoveredOpts);
-        target.fallbackModels = [...(target.fallbackModels ?? []), model]; // reuse it for the rest of the run
-        rememberDiscoveredModel(target, model); // ...and in later runs
-        clearProviderBusy(target);
-        return { content, model, skippedModels, usage };
-      } catch (err) {
-        if (!(err instanceof ProviderError)) throw err;
-        if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
-          throw withHistory(err, skippedModels);
-        }
-        if (err.kind === "model_unavailable") {
-          unavailable.add(model);
-          markModelDead(target, model);
-        }
-        skippedModels.push({ model, reason: err.reason, next: found[i + 1], nextDiscovered: Boolean(found[i + 1]) });
-        lastError = err;
-      }
-    }
+    result = await tryModels(found, discoveredOpts, true);
+    if (result) return result;
   }
 
-  const tried = [target.model, ...(target.fallbackModels ?? [])].join(", ");
-  const kind = lastError?.kind === "overloaded" ? "overloaded" : "model_unavailable";
-  if (kind === "overloaded") markProviderBusy(target); // skip it for a few minutes in later steps and runs
-  // No configured or discoverable model works: stop trying this provider for a while.
-  else if (target.discoveryTried || !target.modelHints) markProviderBusy(target, noModelsSkipMs(), SKIP_REASONS.noModels);
-  throw new ProviderError(
-    kind === "overloaded"
-      ? `${target.provider} models are overloaded (tried: ${tried}): ${lastError?.message}`
-      : `${target.provider} has no available models (tried: ${tried})${lastError ? `: ${lastError.message}` : ""}`,
+  // Every model failed. Report the most actionable failure.
+  const pick =
+    KIND_PRIORITY.map((k) => failures.filter((f) => f.err.kind === k)).find((list) => list.length) ?? [];
+  const chosen = pick[pick.length - 1]; // the last model tried with that problem (what the log names)
+  const kind: ProviderErrorKind = chosen?.err.kind ?? "model_unavailable";
+  const retryAfters = pick.map((f) => f.err.retryAfterMs).filter((v): v is number => v !== undefined);
+  const allOf = (k: ProviderErrorKind) => failures.length > 0 && failures.every((f) => f.err.kind === k);
+  if (allOf("overloaded")) markProviderBusy(target); // skip it for a few minutes in later steps and runs
+  else if ((allOf("model_unavailable") || failures.length === 0) && (target.discoveryTried || !target.modelHints)) {
+    markProviderBusy(target, noModelsSkipMs(), SKIP_REASONS.noModels); // no configured or discoverable model works
+  }
+  const summary = failures.map((f) => `${f.model}: ${f.err.reason}`).join("; ") || "no models left to try";
+  const e = new ProviderError(
+    `${target.provider}: every model failed (${summary})`,
     kind,
-    lastError?.status ?? (kind === "overloaded" ? 503 : 404),
-    lastError?.retryAfterMs,
+    chosen?.err.status ?? 404,
+    retryAfters.length ? Math.min(...retryAfters) : undefined,
     skippedModels,
-    lastError?.detail,
+    chosen?.err.detail,
   );
+  e.model = chosen?.model;
+  return Promise.reject(e);
 }
 
 /** One traced provider call: emits start/end events with status, latency and tokens. */
@@ -316,7 +337,7 @@ async function requestOnce(
   model: string,
   messages: ChatMessage[],
   opts: ChatOptions,
-): Promise<{ content: string; usage: TokenUsage }> {
+): Promise<{ content: string; usage: TokenUsage; reasoningChars?: number }> {
   const base = {
     provider: target.provider,
     model,
@@ -343,7 +364,7 @@ async function requestOnce(
     });
     // Keep exactly what the model said (before cleanup), so a run can be reviewed later.
     finish({ status: 200, outcome: "ok", tokens: result.usage, reply: clip(result.raw ?? result.content) });
-    return { content: result.content, usage: result.usage };
+    return { content: result.content, usage: result.usage, reasoningChars: result.reasoningChars };
   } catch (err) {
     const pe = err instanceof ProviderError ? err : undefined;
     if (pe) pe.model ??= model;
@@ -363,7 +384,9 @@ function classifyError(target: ProviderTarget, model: string, status: number, ra
   }
   if (status === 429 && DAILY_LIMIT_TEXT.test(detail)) {
     markProviderBusy(target, dailyLimitSkipMs(), SKIP_REASONS.dailyLimit);
-    return new ProviderError(`${target.provider} daily limit reached: ${detail}`, "rate_limit", status, retryAfterMs, [], said);
+    const e = new ProviderError(`${target.provider} daily limit reached: ${detail}`, "rate_limit", status, retryAfterMs, [], said);
+    e.accountLevel = true;
+    return e;
   }
   if (status === 429 || RATE_LIMIT_TEXT.test(detail)) {
     return new ProviderError(`${target.provider} rate limited: ${detail}`, "rate_limit", status, retryAfterMs);
@@ -403,7 +426,7 @@ async function requestUntraced(
   messages: ChatMessage[],
   opts: ChatOptions,
   allowStreamOptions = true,
-): Promise<{ content: string; usage: TokenUsage; raw?: string }> {
+): Promise<{ content: string; usage: TokenUsage; raw?: string; reasoningChars?: number }> {
   const url = `${target.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const body: Record<string, unknown> = { model, messages, stream: true };
   if (allowStreamOptions && target.streamUsage !== false) body.stream_options = { include_usage: true };
@@ -459,8 +482,9 @@ async function requestUntraced(
       } catch {
         throw new ProviderError(`${target.provider} returned non-JSON body`, "bad_response", res.status);
       }
-      const content = (parsed as any)?.choices?.[0]?.message?.content;
-      return finishContent(target, res.status, messages, typeof content === "string" ? content : "", parsed);
+      const msg = (parsed as any)?.choices?.[0]?.message;
+      const reasoning = msg?.reasoning ?? msg?.reasoning_content;
+      return finishContent(target, res.status, messages, typeof msg?.content === "string" ? msg.content : "", parsed, typeof reasoning === "string" ? reasoning.length : 0);
     }
 
     // Server-Sent Events stream.
@@ -469,6 +493,7 @@ async function requestUntraced(
     const decoder = new TextDecoder();
     let buf = "";
     let content = "";
+    let reasoningChars = 0;
     let usage: unknown;
     let lastProgress = 0;
     for (;;) {
@@ -495,6 +520,9 @@ async function requestUntraced(
         }
         const delta = j.choices?.[0]?.delta;
         if (typeof delta?.content === "string") content += delta.content;
+        // Hidden reasoning streamed separately (OpenRouter "reasoning", DeepSeek/NIM "reasoning_content").
+        const r = delta?.reasoning ?? delta?.reasoning_content;
+        if (typeof r === "string") reasoningChars += r.length;
         if (j.usage) usage = j.usage;
       }
       if (opts.onStreamProgress && state.lastChunk - lastProgress > 500) {
@@ -503,7 +531,7 @@ async function requestUntraced(
       }
     }
     if (controller.signal.aborted) throw new ProviderError("aborted", "timeout"); // reader was cancelled by the watchdog
-    return finishContent(target, res.status, messages, content, usage ? { usage } : undefined);
+    return finishContent(target, res.status, messages, content, usage ? { usage } : undefined, reasoningChars);
   } catch (err) {
     if (err instanceof ProviderError && !(err.kind === "timeout" && err.message === "aborted")) throw err;
     if (controller.signal.aborted) {
@@ -515,11 +543,25 @@ async function requestUntraced(
   }
 }
 
-function finishContent(target: ProviderTarget, status: number, messages: ChatMessage[], content: string, usageSource: unknown) {
+function finishContent(
+  target: ProviderTarget,
+  status: number,
+  messages: ChatMessage[],
+  content: string,
+  usageSource: unknown,
+  streamedReasoningChars = 0,
+) {
   if (content.trim() === "") throw new ProviderError(`${target.provider} returned empty completion`, "bad_response", status);
   // Reasoning models (e.g. some NIM-hosted ones) prepend <think>…</think>; it's not part of the artifact.
   const cleaned = content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, "");
-  return { content: cleaned || content, usage: readUsage(usageSource, messages, content), raw: content };
+  const reasoningChars = streamedReasoningChars + (cleaned ? content.length - cleaned.length : 0);
+  const usage = readUsage(usageSource, messages, content);
+  // No reported reasoning count, but we saw reasoning text: estimate it.
+  if (usage.reasoningTokens === undefined && reasoningChars > 0) {
+    usage.reasoningTokens = estimateTokens("x".repeat(reasoningChars));
+    usage.reasoningEstimated = true;
+  }
+  return { content: cleaned || content, usage, raw: content, reasoningChars };
 }
 
 /** Longest raw reply kept per call for the run record / export. */
