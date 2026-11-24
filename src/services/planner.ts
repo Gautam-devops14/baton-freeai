@@ -118,7 +118,7 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
       const plan = parsePlan(result.content);
       ws.metadata = { ...ws.metadata, ...plan.metadata };
       ws.tasks = plan.tasks;
-      log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestones`, result.usage);
+      log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestone${plan.tasks.length === 1 ? "" : "s"}`, result.usage);
       return;
     } catch (err) {
       lastError = err;
@@ -130,7 +130,10 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
         ws,
         0,
         "failover",
-        { ...target, model: result?.model ?? target.model },
+        {
+          ...target,
+          model: result?.model ?? (err instanceof ProviderError ? err.skippedModels.at(-1)?.model : undefined) ?? target.model,
+        },
         next ? `${reason}; passing planning to ${next.provider}` : `${reason}; no planners left`,
         result?.usage,
       );

@@ -114,6 +114,10 @@ export interface ProviderTarget {
   sendTemperature?: boolean;
   /** False for providers/models that reject `response_format: json_object`. Default true. */
   supportsJsonMode?: boolean;
+  /** Preference order used to pick a model from the provider's live list when all configured models are retired. */
+  modelHints?: Array<string | RegExp>;
+  /** Filled in at runtime: model discovery already ran for this target in the current request. */
+  discoveryTried?: boolean;
   baseUrl: string;
   apiKey: string;
 }

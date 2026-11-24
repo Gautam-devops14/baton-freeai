@@ -49,7 +49,8 @@ curl -s localhost:3000/api/orchestrate -H 'content-type: application/json' -d '{
 * `taskType`: `code` (default), `document`, or `analysis`.
 * `keys`: at least one is required (BYOK). With only one key, Baton runs single-provider and loses failover.
   * Order for building files: Groq → Gemini → NVIDIA NIM → OpenAI. Order for planning: Gemini → Groq → NVIDIA NIM → OpenAI.
-  * NVIDIA NIM (`integrate.api.nvidia.com`, keys from build.nvidia.com) uses `qwen/qwen2.5-coder-32b-instruct` for code and `meta/llama-3.3-70b-instruct` otherwise, each with a fallback model (override with `NVIDIA_CODE_MODELS` / `NVIDIA_GENERAL_MODELS`).
+  * Default models: see `.env.example`. Each provider has an ordered model list (`GROQ_*_MODELS`, `GEMINI_MODELS`, `NVIDIA_*_MODELS`, `OPENAI_MODELS`).
+  * NVIDIA NIM uses `integrate.api.nvidia.com`, with keys from build.nvidia.com.
   * OpenAI has no free API tier, so its key needs billing. It is always tried last, so it only costs money when the free providers fail. Default models: `gpt-5-mini`, then `gpt-4.1-mini` (override with `OPENAI_MODELS`).
 * Returns the spec §4.1 payload. `status` is `success`, `partial` (some tasks failed on every provider), or `failed`.
 * Chit-chat and commands (`hi`, `thanks`, `help`, `status`, …) return `{"status":"gated", ...}` immediately. They need no keys and make no provider calls.
@@ -74,6 +75,8 @@ Implementation choices that go beyond the spec:
 * **Any provider error fails over** (auth, 4xx, malformed reply), not only 429 and timeouts. The log message records the actual reason.
 * **Unguessable workspace IDs** (`ws_<ts>_<random>`). The ID is the download token, so a bare timestamp would let anyone fetch another user's artifacts.
 * **Timeout covers the response body**, not just the headers. A provider that stalls mid-response still triggers failover after 30s.
+* **Model discovery.** Providers retire model IDs without notice: Groq dropped the spec's `qwen-2.5-coder-32b`, and NVIDIA's older IDs answer `410 Gone`. When every configured model for a provider is gone, Baton calls the provider's free `GET /models` once per run and picks the best current chat model (coder models first for code). The log says `(picked from <provider>'s current model list)`. Errors such as 404, 410, and 400 "decommissioned" or "no longer supported" all count as "model gone".
+* **Provider error text in the log.** For non-obvious failures, the log shows the provider's own message, e.g. `HTTP 400 model unavailable: The model … has been decommissioned`.
 * **Gemini model fallback.** Google retires model IDs for new users without notice. Gemini is configured with a model list (`gemini-3.8-flash`, then `gemini-3.5-flash-lite`; override with `GEMINI_MODELS`). On HTTP 404 or a "no longer available" error, the next model is tried first, and only when every model is gone does Baton fail over to Groq. A retired model is remembered for the rest of the request, so it costs one extra call, not one per file. Each swap appears in the relay log.
 * **Overloaded models (503 / "high demand").** Baton first tries the next model in the list, which often has separate capacity. Busy models aren't remembered as dead, because the spike is temporary. If another provider is available Baton switches right away. If it's the last provider, Baton waits `BATON_OVERLOAD_RETRY_MS` (default 2s) and tries once more. Planning errors list what each provider returned, plus a likely cause.
 * **Keys are never logged or persisted.** The stored workspace holds no credentials.

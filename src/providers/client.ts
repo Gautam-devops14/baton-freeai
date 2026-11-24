@@ -2,6 +2,7 @@
 // One fetch helper for every provider; no vendor SDKs.
 
 import type { ChatMessage, ProviderTarget, TokenUsage } from "../types.js";
+import { listModels, rankModels } from "./discovery.js";
 
 export const DEFAULT_TIMEOUT_MS = Number(process.env.BATON_PROVIDER_TIMEOUT_MS ?? 30_000);
 
@@ -26,6 +27,8 @@ export class ProviderError extends Error {
     readonly retryAfterMs?: number,
     /** Models stepped past (retired / not found) before this error was raised. */
     readonly skippedModels: SkippedModel[] = [],
+    /** The provider's own error message, shortened (shown in logs for non-obvious failures). */
+    readonly detail?: string,
   ) {
     super(message);
     this.name = "ProviderError";
@@ -33,6 +36,12 @@ export class ProviderError extends Error {
 
   /** Short human-readable reason used in execution logs. */
   get reason(): string {
+    const base = this.baseReason();
+    const showDetail = this.detail && ["client", "model_unavailable", "auth", "bad_response", "server"].includes(this.kind);
+    return showDetail ? `${base}: ${this.detail}` : base;
+  }
+
+  private baseReason(): string {
     switch (this.kind) {
       case "rate_limit":
         return `HTTP ${this.status ?? 429} rate limit detected`;
@@ -95,7 +104,22 @@ function parseRetryAfter(header: string | null): number | undefined {
 
 /** Models a provider has told us it no longer serves (404 / "no longer available"). */
 const MODEL_UNAVAILABLE_TEXT =
-  /no longer available|(?:model|models\/)\S*\s+(?:is\s+)?not found|not found for api version|does not exist|is not supported for/i;
+  /no longer available|no longer supported|decommissioned|deprecated and (?:is|has been) removed|model_not_found|model_decommissioned|unknown model|invalid model|not a valid model|does not have access to model|(?:model|models\/)\S*\s+(?:is\s+)?not found|not found for api version|does not exist|is not supported for/i;
+
+/** Pull a human-readable message out of the many error-body shapes providers use. */
+function providerMessage(raw: string): string | undefined {
+  let msg: unknown;
+  try {
+    const j = JSON.parse(raw);
+    const o = Array.isArray(j) ? j[0] : j;
+    msg = o?.error?.message ?? o?.detail ?? o?.message ?? (typeof o?.error === "string" ? o.error : undefined) ?? o?.title;
+  } catch {
+    msg = raw;
+  }
+  if (typeof msg !== "string") return undefined;
+  const oneLine = msg.replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+  return oneLine ? (oneLine.length > 160 ? `${oneLine.slice(0, 157)}...` : oneLine) : undefined;
+}
 
 export interface SkippedModel {
   model: string;
@@ -104,6 +128,8 @@ export interface SkippedModel {
   next?: string;
   /** Delay before trying `next` (set when retrying overloaded models). */
   afterMs?: number;
+  /** `next` came from the provider's live model list, not the configured list. */
+  nextDiscovered?: boolean;
 }
 
 export interface ChatResult {
@@ -168,7 +194,7 @@ export async function chatCompletion(
         if (!(err instanceof ProviderError)) throw err;
         if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
           // e.g. the fallback model is rate limited: surface it, but keep the swap history.
-          throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels);
+          throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels, err.detail);
         }
         if (err.kind === "model_unavailable") unavailable.add(model);
         else overloaded.push(model);
@@ -184,6 +210,30 @@ export async function chatCompletion(
     candidates = overloaded;
   }
 
+  // Every configured model is retired: ask the provider what it serves today (once per run).
+  if (lastError?.kind === "model_unavailable" && target.modelHints && !target.discoveryTried) {
+    target.discoveryTried = true;
+    const found = rankModels(await listModels(target), target.modelHints, unavailable);
+    if (found.length && skippedModels.length) {
+      Object.assign(skippedModels[skippedModels.length - 1], { next: found[0], nextDiscovered: true });
+    }
+    for (const [i, model] of found.entries()) {
+      try {
+        const { content, usage } = await requestOnce(target, model, messages, opts);
+        target.fallbackModels = [...(target.fallbackModels ?? []), model]; // reuse it for the rest of the run
+        return { content, model, skippedModels, usage };
+      } catch (err) {
+        if (!(err instanceof ProviderError)) throw err;
+        if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
+          throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels, err.detail);
+        }
+        if (err.kind === "model_unavailable") unavailable.add(model);
+        skippedModels.push({ model, reason: err.reason, next: found[i + 1], nextDiscovered: Boolean(found[i + 1]) });
+        lastError = err;
+      }
+    }
+  }
+
   const tried = [target.model, ...(target.fallbackModels ?? [])].join(", ");
   const kind = lastError?.kind === "overloaded" ? "overloaded" : "model_unavailable";
   throw new ProviderError(
@@ -194,6 +244,7 @@ export async function chatCompletion(
     lastError?.status ?? (kind === "overloaded" ? 503 : 404),
     lastError?.retryAfterMs,
     skippedModels,
+    lastError?.detail,
   );
 }
 
@@ -248,19 +299,24 @@ async function requestOnce(
     if (res.status === 429 || RATE_LIMIT_TEXT.test(detail)) {
       throw new ProviderError(`${target.provider} rate limited: ${detail}`, "rate_limit", res.status, retryAfterMs);
     }
-    if (res.status === 404 || ((res.status === 400 || res.status === 410) && MODEL_UNAVAILABLE_TEXT.test(detail))) {
-      throw new ProviderError(`${target.provider} model ${model} unavailable: ${detail}`, "model_unavailable", res.status);
+    const said = providerMessage(raw);
+    if (
+      res.status === 404 ||
+      res.status === 410 ||
+      ([400, 403, 422].includes(res.status) && MODEL_UNAVAILABLE_TEXT.test(detail))
+    ) {
+      throw new ProviderError(`${target.provider} model ${model} unavailable: ${detail}`, "model_unavailable", res.status, undefined, [], said);
     }
     if (res.status === 401 || res.status === 403 || (res.status === 400 && BAD_KEY_TEXT.test(detail))) {
-      throw new ProviderError(`${target.provider} auth failed: ${detail}`, "auth", res.status);
+      throw new ProviderError(`${target.provider} auth failed: ${detail}`, "auth", res.status, undefined, [], said);
     }
     if (res.status === 503 || (res.status >= 500 && OVERLOAD_TEXT.test(detail))) {
       throw new ProviderError(`${target.provider} model ${model} overloaded: ${detail}`, "overloaded", res.status, retryAfterMs);
     }
     if (res.status >= 500) {
-      throw new ProviderError(`${target.provider} server error: ${detail}`, "server", res.status, retryAfterMs);
+      throw new ProviderError(`${target.provider} server error: ${detail}`, "server", res.status, retryAfterMs, [], said);
     }
-    throw new ProviderError(`${target.provider} rejected request: ${detail}`, "client", res.status);
+    throw new ProviderError(`${target.provider} rejected request: ${detail}`, "client", res.status, undefined, [], said);
   }
 
   let content: unknown;

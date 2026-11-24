@@ -56,7 +56,11 @@ test("HTTP 404 on the first model retries with the next model", async () => {
   assert.equal(r.content, "from lite");
   assert.equal(r.model, "gemini-3.5-flash-lite");
   assert.deepEqual(r.skippedModels, [
-    { model: "gemini-3.8-flash", reason: "HTTP 404 model unavailable", next: "gemini-3.5-flash-lite" },
+    {
+      model: "gemini-3.8-flash",
+      reason: "HTTP 404 model unavailable: This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash",
+      next: "gemini-3.5-flash-lite",
+    },
   ]);
 });
 

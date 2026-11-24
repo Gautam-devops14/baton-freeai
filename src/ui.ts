@@ -278,7 +278,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     if (run.status === "gated") {
       summary.append(el("span", { textContent: (run.message || run.response || "") + " (0 tokens used)" }));
     } else if (run.summary) {
-      summary.append(el("span", { textContent: run.summary.completedTasks + " of " + run.summary.totalTasks + " files built" }));
+      summary.append(el("span", { textContent: " " + run.summary.completedTasks + " of " + run.summary.totalTasks + " files built " }));
     }
     const files = Object.keys(run.artifacts || {}).length;
     if (files && run.downloadUrl) summary.append(el("a", { className: "dl", href: run.downloadUrl, textContent: "Download .zip" }));
@@ -292,9 +292,8 @@ export const UI_HTML = /* html */ `<!doctype html>
       tokBox.hidden = false;
       const by = Object.entries(u.byProvider || {}).map(([p, t]) => (PROVIDER_LABEL[p] || p) + " " + fmt(t.totalTokens)).join(" · ");
       tokBox.replaceChildren(
-        el("span", {}, "Tokens: ", el("strong", { textContent: fmt(u.total.totalTokens) })),
-        el("span", { className: "by", textContent: fmt(u.total.promptTokens) + " in · " + fmt(u.total.completionTokens) + " out" + (u.total.estimated ? " · some estimated" : "") }),
-        ...(by ? [el("span", { className: "by", textContent: by })] : []),
+        el("span", {}, "Tokens: ", el("strong", { textContent: fmt(u.total.totalTokens) }), " "),
+        el("span", { className: "by", textContent: "(" + fmt(u.total.promptTokens) + " in, " + fmt(u.total.completionTokens) + " out" + (u.total.estimated ? ", some estimated" : "") + ")" + (by ? " · " + by : "") }),
       );
     } else {
       tokBox.hidden = true;

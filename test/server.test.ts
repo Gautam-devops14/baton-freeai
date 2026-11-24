@@ -158,7 +158,7 @@ test("retired Gemini model: planner swaps to the lite model, relay skips the dea
   assert.equal(out.status, "success");
   const first = out.executionLogs.slice(0, 2).map((l: any) => [l.event, l.model, l.message]);
   assert.deepEqual(first, [
-    ["failover", "gemini-3.8-flash", "HTTP 404 model unavailable; retrying with gemini-3.5-flash-lite"],
+    ["failover", "gemini-3.8-flash", "HTTP 404 model unavailable: This model is no longer available to new users; retrying with gemini-3.5-flash-lite"],
     ["plan", "gemini-3.5-flash-lite", "Project decomposed into 3 milestones"],
   ]);
   const geminiModelsCalled = calls.filter((c) => isGemini(c.url)).map((c) => c.model);
@@ -180,10 +180,10 @@ test("all Gemini models retired: planning falls over to Groq only after both wer
   assert.deepEqual(out.executionLogs.slice(0, 4).map((l: any) => `${l.event}:${l.provider}:${l.model}`), [
     "failover:google:gemini-3.8-flash",
     "failover:google:gemini-3.5-flash-lite",
-    "failover:google:gemini-3.8-flash",
-    "plan:groq:qwen-2.5-coder-32b",
+    "failover:google:gemini-3.5-flash-lite",
+    "plan:groq:openai/gpt-oss-120b",
   ]);
-  assert.match(out.executionLogs[2].message, /HTTP 404 model unavailable; passing planning to groq/);
+  assert.match(out.executionLogs[2].message, /HTTP 404 model unavailable: no longer available; passing planning to groq/);
 });
 
 const OVERLOADED = () => new Response(

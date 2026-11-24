@@ -49,7 +49,9 @@ export function logModelSwaps(ws: BatonWorkspace, step: number, provider: string
       "failover",
       { provider, model: s.model },
       s.next
-        ? `${s.reason}; retrying with ${s.next}${s.afterMs ? ` in ${Math.round(s.afterMs / 100) / 10}s` : ""}`
+        ? `${s.reason}; retrying with ${s.next}${s.afterMs ? ` in ${Math.round(s.afterMs / 100) / 10}s` : ""}${
+            s.nextDiscovered ? ` (picked from ${provider}'s current model list)` : ""
+          }`
         : `${s.reason}; no more ${provider} models to try`,
     );
   }

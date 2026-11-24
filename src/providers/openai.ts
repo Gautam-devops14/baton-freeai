@@ -22,5 +22,6 @@ export function openaiTarget(apiKey: string): ProviderTarget {
     apiKey,
     // GPT-5 family (reasoning models) reject any non-default temperature.
     sendTemperature: false,
+    modelHints: [/^gpt-5-mini$/, /^gpt-4\.1-mini$/, /^gpt-.*mini$/, /^gpt-/],
   };
 }

@@ -24,5 +24,13 @@ export const GEMINI_MODEL = GEMINI_MODELS[0];
 
 export function geminiTarget(apiKey: string): ProviderTarget {
   const [model, ...fallbackModels] = GEMINI_MODELS;
-  return { provider: "google", model, fallbackModels, baseUrl: GEMINI_BASE_URL, apiKey };
+  return {
+    provider: "google",
+    model,
+    fallbackModels,
+    baseUrl: GEMINI_BASE_URL,
+    apiKey,
+    // Plain "gemini-X-flash" first (newest version wins the tie), then lite, then pro.
+    modelHints: [/^gemini-[\d.]+-flash$/, /^gemini-[\d.]+-flash-lite$/, /^gemini-.*flash/, /^gemini-.*pro/],
+  };
 }

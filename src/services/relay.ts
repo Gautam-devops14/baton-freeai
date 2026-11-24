@@ -108,7 +108,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
           ws,
           task.id,
           "failover",
-          target,
+          { ...target, model: pe.skippedModels.at(-1)?.model ?? target.model },
           next
             ? `${pe.reason}; passing baton to ${PROVIDER_NAMES[next.provider] ?? next.provider}`
             : `${pe.reason}; no providers left for ${task.targetArtifact}`,
