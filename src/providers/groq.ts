@@ -9,14 +9,16 @@ const list = (env: string | undefined, fallback: string[]) => {
 };
 
 /**
- * Ordered preference per task type. The spec's qwen-2.5-coder-32b has been
- * decommissioned by Groq, so defaults use current general models; if these are
- * retired too, Baton discovers a replacement from Groq's live model list.
- * Override with GROQ_CODE_MODELS / GROQ_GENERAL_MODELS (comma-separated).
+ * Ordered preference. The spec's qwen-2.5-coder-32b has been decommissioned by
+ * Groq. llama-3.3-70b-versatile does the real work; llama-3.1-8b-instant is a
+ * small, high-limit backup. If both are retired, Baton discovers a replacement
+ * from Groq's live model list. Override with GROQ_CODE_MODELS / GROQ_GENERAL_MODELS.
  */
+export const DEFAULT_GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
+
 export const GROQ_MODELS = {
-  code: list(process.env.GROQ_CODE_MODELS ?? process.env.GROQ_CODE_MODEL, ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"]),
-  general: list(process.env.GROQ_GENERAL_MODELS ?? process.env.GROQ_GENERAL_MODEL, ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"]),
+  code: list(process.env.GROQ_CODE_MODELS ?? process.env.GROQ_CODE_MODEL, DEFAULT_GROQ_MODELS),
+  general: list(process.env.GROQ_GENERAL_MODELS ?? process.env.GROQ_GENERAL_MODEL, DEFAULT_GROQ_MODELS),
 };
 
 export function groqModelFor(taskType: TaskType): string {

@@ -181,7 +181,7 @@ test("all Gemini models retired: planning falls over to Groq only after both wer
     "failover:google:gemini-3.8-flash",
     "failover:google:gemini-3.5-flash-lite",
     "failover:google:gemini-3.5-flash-lite",
-    "plan:groq:openai/gpt-oss-120b",
+    "plan:groq:llama-3.3-70b-versatile",
   ]);
   assert.match(out.executionLogs[2].message, /HTTP 404 model unavailable: no longer available; passing planning to groq/);
 });
