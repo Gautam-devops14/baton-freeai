@@ -167,6 +167,8 @@ export interface BatonWorkspace {
   answer?: string;
   /** Live progress sink (not persisted). */
   emit?: (event: ProgressEvent) => void;
+  /** Aborted when the user presses Stop or disconnects (not persisted). */
+  signal?: AbortSignal;
   metadata: {
     primaryLanguage?: string;
     framework?: string;
@@ -208,12 +210,17 @@ export interface OrchestrateRequest {
   clientRunId?: string;
   /** Providers to use, in order (planning and building). Unlisted providers are not used. */
   providerOrder?: string[];
+  /** History id of a run that stopped part-way: build its unfinished files with the same plan (no new planning call). */
+  resumeFrom?: string;
 }
 
 export interface OrchestrateResponse {
   /** "answered": the message was a question; see `answer`. No files were built. */
-  status: "success" | "partial" | "failed" | "answered";
+  /** "stopped": the user pressed Stop; files finished before that are kept. */
+  status: "success" | "partial" | "failed" | "answered" | "stopped";
   answer?: string;
+  /** Short note, e.g. "Stopped by you." */
+  message?: string;
   workspaceId: string;
   /** Id of this run in the history store (same as workspaceId), if history is enabled. */
   historyId?: string;

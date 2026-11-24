@@ -2,7 +2,7 @@
 // Planning is isolated from generation (guardrail 4) so the blueprint survives
 // even if a later generation call fails or runs out of tokens.
 
-import { chatCompletion, cooldownSteps, isTransient, ProviderError } from "../providers/client.js";
+import { chatCompletion, cooldownSteps, isCancelled, isTransient, ProviderError, sleepUnlessCancelled, stepDeadlineMs } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
 import { safeArtifactPath } from "./paths.js";
 import { isAccountSkipped, splitBusy } from "../providers/memory.js";
@@ -12,7 +12,6 @@ import { estimateTokens } from "../providers/client.js";
 import { attachBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 
 /** We ask for 2-4 tasks (spec), but accept a 1-task plan rather than failing a small request. */
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export const MIN_TASKS = 2;
 export const MAX_TASKS = 4;
 export const MIN_ACCEPTED_TASKS = 1;
@@ -200,6 +199,10 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
   );
   const { ready: targets, skipped } = splitBusy(allTargets);
   logBusySkips(ws, 0, skipped);
+  // Same hard time limit as a build step, across every planner, retry and wait (0 = no limit).
+  const limitMs = stepDeadlineMs();
+  const deadlineAt = limitMs > 0 ? Date.now() + limitMs : undefined;
+  const fits = (ms: number) => deadlineAt === undefined || Date.now() + ms < deadlineAt;
   let lastError: unknown;
   const attempts: PlanAttempt[] = [];
   const transient = new Set<ProviderTarget>(); // failed with a problem that usually clears within a minute
@@ -207,6 +210,11 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
   /** One pass over the planners in order. True once a plan (or an answer) is in. */
   const round = async (list: ProviderTarget[]): Promise<boolean> => {
     for (const [i, target] of list.entries()) {
+      if (!fits(0)) {
+        log(ws, 0, "failover", { provider: "baton", model: "planner" }, `planning time limit (${Math.round(limitMs / 1000)}s) reached`);
+        attempts.push({ provider: target.provider, kind: "timeout", reason: "planning time limit reached" });
+        return false;
+      }
       // Kept outside `try` so tokens are still counted when the reply is an unusable plan.
       let result: Awaited<ReturnType<typeof chatCompletion>> | undefined;
       try {
@@ -215,6 +223,7 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
           temperature: 0.1,
           retryOverloaded: i === list.length - 1, // nobody left to hand off to: worth a short wait
           ...traceFor(ws, 0),
+          deadlineAt,
         });
         logModelSwaps(ws, 0, target.provider, result.skippedModels);
         const plan = parsePlan(result.content);
@@ -230,6 +239,7 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
         log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestone${plan.tasks.length === 1 ? "" : "s"}`, result.usage);
         return true;
       } catch (err) {
+        if (isCancelled(err)) throw err; // Stop pressed
         lastError = err;
         if (err instanceof ProviderError) logModelSwaps(ws, 0, target.provider, err.skippedModels);
         // The model answered but its plan was unusable: those tokens were wasted.
@@ -260,10 +270,10 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
   // Cool-down rounds: the planners failed with problems that usually clear within a minute.
   for (const secs of cooldownSteps()) {
     const retryable = allTargets.filter((t) => (transient.has(t) || !targets.includes(t)) && !isAccountSkipped(t));
-    if (!transient.size || !retryable.length) break;
+    if (!transient.size || !retryable.length || !fits(secs * 1000 + 1000)) break;
     log(ws, 0, "failover", { provider: "baton", model: "planner" },
       `all planners are busy or rate limited; cooling down ${secs}s, then retrying ${retryable.map((t) => t.provider).join(" → ")}`);
-    await sleep(secs * 1000);
+    await sleepUnlessCancelled(secs * 1000, ws.signal);
     if (await round(retryable)) return;
   }
 

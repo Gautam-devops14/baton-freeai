@@ -4,7 +4,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { pathToFileURL } from "node:url";
 import { createArtifactZip } from "./services/bundler.js";
 import { mergeBreakdowns, mergeUsage } from "./services/logging.js";
-import { CLIENT_RUN_ID_RE, subscribeProgress } from "./services/progress.js";
+import { cancelRun, CLIENT_RUN_ID_RE, registerRun, subscribeProgress } from "./services/progress.js";
 import { providerOrder } from "./services/orchestrator.js";
 import { DEFAULT_TIMEOUT_MS } from "./providers/client.js";
 import { forgetProviderMemory, snapshotMemory } from "./providers/memory.js";
@@ -40,6 +40,7 @@ const orchestrateSchema = {
     properties: {
       userPrompt: { type: "string", minLength: 1, maxLength: 20_000 },
       continueFrom: { type: "string", pattern: "^(ws|run)_[A-Za-z0-9_]+$" },
+      resumeFrom: { type: "string", pattern: "^(ws|run)_[A-Za-z0-9_]+$" },
       chatId: { type: "string", pattern: "^(ws|run)_[A-Za-z0-9_]+$" },
       clientRunId: { type: "string", pattern: "^[a-f0-9]{8,64}$" },
       providerOrder: {
@@ -80,8 +81,16 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   app.get("/health", async () => ({ status: "ok" }));
 
   app.post<{ Body: OrchestrateRequest }>("/api/orchestrate", { schema: orchestrateSchema }, async (req, reply) => {
+    // Stop: the browser aborts its request (closing the connection) and/or calls POST /api/cancel/:clientRunId.
+    // Either way every upstream provider request is cancelled at once; finished files are kept.
+    const controller = new AbortController();
+    const onClose = () => {
+      if (!reply.raw.writableEnded) controller.abort();
+    };
+    reply.raw.on("close", onClose);
+    const unregister = req.body.clientRunId ? registerRun(req.body.clientRunId, controller) : () => {};
     try {
-      return await orchestrate({ ...req.body, keys: req.body.keys ?? {} }, store, history);
+      return await orchestrate({ ...req.body, keys: req.body.keys ?? {} }, store, history, { signal: controller.signal });
     } catch (err) {
       const info = err as OrchestrationErrorInfo;
       const extra = { historyId: info.historyId, executionLogs: info.executionLogs ?? [] };
@@ -95,7 +104,16 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         return reply.code(502).send({ status: "error", error: "planning_failed", message: err.message, ...extra });
       }
       throw err;
+    } finally {
+      unregister();
+      reply.raw.off("close", onClose);
     }
+  });
+
+  // ---- Stop a running request (the Stop button) ----
+  app.post<{ Params: { id: string } }>("/api/cancel/:id", async (req, reply) => {
+    if (!CLIENT_RUN_ID_RE.test(req.params.id)) return reply.code(400).send({ status: "error", error: "bad_id" });
+    return { cancelled: cancelRun(req.params.id) };
   });
 
   // ---- History: every prompt and its outcome, persisted on disk ----

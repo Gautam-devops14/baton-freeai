@@ -2,7 +2,7 @@
 // Explicit and imperative by design (guardrail 5): every prompt is built here,
 // from the shared workspace, so any model can pick up where another stopped.
 
-import { chatCompletion, cooldownSteps, isTransient, ProviderError } from "../providers/client.js";
+import { chatCompletion, cooldownSteps, isCancelled, isTransient, ProviderError, sleepUnlessCancelled, stepDeadlineMs } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
 import { busyUntilFor, isAccountSkipped, splitBusy } from "../providers/memory.js";
 import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, markWasted, traceFor } from "./logging.js";
@@ -20,7 +20,6 @@ const UNKNOWN_RATE_RESET_MS = 10_000;
 const maxRateWaitMs = () => Number(process.env.BATON_MAX_RATE_WAIT_MS ?? 20_000);
 /** Rate limits resetting within this are waited out immediately, before trying other providers. */
 const shortRateWaitMs = () => Number(process.env.BATON_SHORT_RATE_WAIT_MS ?? 8_000);
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const PROVIDER_NAMES: Record<string, string> = {
   google: "Google AI Studio",
@@ -188,6 +187,22 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
   for (const task of ws.tasks) {
     if (task.status === "completed") continue;
     task.status = "in_progress";
+    // Hard limit for this milestone across every provider, retry and wait (0 = no limit).
+    const limitMs = stepDeadlineMs();
+    const deadlineAt = limitMs > 0 ? Date.now() + limitMs : undefined;
+    const fits = (ms: number) => deadlineAt === undefined || Date.now() + ms < deadlineAt;
+    let deadlineLogged = false;
+    /** True (and logged once) when the milestone's time is up. */
+    const outOfTime = (): boolean => {
+      if (deadlineAt === undefined || Date.now() < deadlineAt) return false;
+      if (!deadlineLogged) {
+        deadlineLogged = true;
+        log(ws, task.id, "failover", { provider: "baton", model: "relay" },
+          `step time limit (${Math.round(limitMs / 1000)}s) reached for ${task.targetArtifact}; stopping here so finished files are kept (resume to try again)`);
+      }
+      return true;
+    };
+    const sleep = (ms: number) => sleepUnlessCancelled(ms, ws.signal);
     const editMode = useEditMode(ws, task);
     const original = ws.artifacts[task.targetArtifact]; // restored before any retry
     const { messages, sections } = buildTaskPrompt(ws, task, editMode ? "edit" : "full");
@@ -226,6 +241,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         const result = await chatCompletion(target, messages, {
           retryOverloaded: isLast, // last resort: a short wait beats failing the task
           ...traceFor(ws, task.id),
+          deadlineAt,
         });
         logModelSwaps(ws, task.id, target.provider, result.skippedModels);
         let note = "";
@@ -292,6 +308,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         log(ws, task.id, "execute", { ...target, model: servedBy }, `Generated ${task.targetArtifact} successfully${note}`, result.usage);
         return undefined;
       } catch (err) {
+        if (isCancelled(err)) throw err; // Stop pressed: not a provider failure
         const pe =
           err instanceof ProviderError ? err : new ProviderError((err as Error).message ?? String(err), "network");
         logModelSwaps(ws, task.id, target.provider, pe.skippedModels);
@@ -304,7 +321,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         // A rate limit that resets within seconds (e.g. Groq "try again in 2s") is cheaper to wait out
         // than a detour through slower, less reliable providers.
         const shortWait =
-          mayWaitShort && pe.kind === "rate_limit" && pe.retryAfterMs !== undefined && pe.retryAfterMs <= shortRateWaitMs() && busyUntilFor(target) === undefined
+          mayWaitShort && pe.kind === "rate_limit" && pe.retryAfterMs !== undefined && pe.retryAfterMs <= shortRateWaitMs() && busyUntilFor(target) === undefined && fits(pe.retryAfterMs + 1000)
             ? pe.retryAfterMs + 250
             : undefined;
         log(
@@ -324,6 +341,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
     const rateLimited: Array<{ target: ProviderTarget; readyAt: number }> = [];
     let sawTransient = false;
     for (const [i, target] of candidates.entries()) {
+      if (outOfTime()) break;
       const next = candidates[i + 1];
       const nextLabel = next && (PROVIDER_NAMES[next.provider] ?? next.provider);
       let failure = await attempt(target, i === candidates.length - 1, nextLabel, true);
@@ -341,11 +359,11 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
 
     // Second chance: every provider failed, but some were only briefly rate limited
     // (e.g. Groq's per-minute token cap). Waiting a few seconds beats failing the file.
-    if (!done()) {
+    if (!done() && !outOfTime()) {
       const maxWait = maxRateWaitMs();
       for (const { target, readyAt } of rateLimited.sort((a, b) => a.readyAt - b.readyAt)) {
         const wait = Math.max(0, readyAt - now()) + 250;
-        if (wait > maxWait) continue;
+        if (wait > maxWait || !fits(wait + 1000)) continue;
         log(ws, task.id, "failover", target, `waiting ${(wait / 1000).toFixed(1)}s for ${target.provider}'s rate limit to reset, then retrying`);
         await sleep(wait);
         cooldowns.delete(keyOf(target));
@@ -355,14 +373,16 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
 
     // Cool-down rounds: every provider failed with problems that usually clear within a minute
     // (rate limits, 503 blips, timeouts). Wait, then retry the whole order, before giving up.
-    if (!done() && sawTransient) {
+    if (!done() && sawTransient && !outOfTime()) {
       for (const secs of cooldownSteps()) {
+        if (!fits(secs * 1000 + 1000)) break; // waiting would blow the step's time limit
         const retryable = opts.targets.filter((t) => cooldowns.get(keyOf(t)) !== Number.POSITIVE_INFINITY && !isAccountSkipped(t));
         if (!retryable.length) break;
         log(ws, task.id, "failover", { provider: "baton", model: "relay" },
           `all providers are busy or rate limited; cooling down ${secs}s, then retrying ${retryable.map((t) => PROVIDER_NAMES[t.provider] ?? t.provider).join(" → ")}`);
         await sleep(secs * 1000);
         for (const [i, target] of retryable.entries()) {
+          if (outOfTime()) break;
           cooldowns.delete(keyOf(target));
           const next = retryable[i + 1];
           const failure = await attempt(target, i === retryable.length - 1, next && (PROVIDER_NAMES[next.provider] ?? next.provider));

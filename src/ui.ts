@@ -137,7 +137,7 @@ export const UI_HTML = /* html */ `<!doctype html>
   .bot-head .when { color: var(--muted); font-size: 12px; }
   .pill { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 600; background: var(--hover); color: var(--text-2); }
   .pill.success, .pill.answered { background: var(--ok-soft); color: var(--ok); }
-  .pill.partial, .pill.failed { background: var(--warn-soft); color: var(--warn); }
+  .pill.partial, .pill.failed, .pill.stopped { background: var(--warn-soft); color: var(--warn); }
   .pill.error { background: var(--bad-soft); color: var(--bad); }
   .pill.running { background: var(--accent-soft); color: var(--accent); }
   .summary-line { font-weight: 500; }
@@ -192,6 +192,16 @@ export const UI_HTML = /* html */ `<!doctype html>
   .send { width: 36px; height: 36px; border: 0; border-radius: 11px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; flex: none; box-shadow: var(--shadow-sm); transition: transform .1s; }
   .send:hover { transform: translateY(-1px); }
   .send:disabled { opacity: .45; cursor: default; transform: none; }
+  .send.stop { background: var(--text); color: var(--bg); }
+  .partialbox { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); padding: 12px 14px; margin-top: 10px; box-shadow: var(--shadow-sm); }
+  .partialbox .ph { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-weight: 600; margin-bottom: 8px; }
+  .meter { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-bottom: 10px; }
+  .meter span { display: block; height: 100%; background: var(--ok); }
+  .steplist { list-style: none; margin: 0 0 10px; padding: 0; font-size: 13px; }
+  .steplist li { display: flex; gap: 8px; padding: 2px 0; overflow-wrap: anywhere; }
+  .steplist .ok { color: var(--ok); } .steplist .bad { color: var(--warn); } .steplist .dim { color: var(--muted); }
+  .steplist code { font-family: var(--mono); font-size: 12.5px; }
+  .pbtns { display: flex; flex-wrap: wrap; gap: 8px; }
   .send .ico { width: 18px; height: 18px; }
   .keywarn { max-width: 780px; margin: 0 auto 8px; font-size: 13px; color: var(--warn); background: var(--warn-soft); border-radius: 10px; padding: 8px 12px; }
   .keywarn button { border: 0; background: none; color: var(--accent); font-weight: 600; padding: 0; }
@@ -443,7 +453,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     return new Date(iso).toLocaleDateString();
   }
   const PROVIDER_LABEL = { groq: "Groq", google: "Gemini", nvidia: "NVIDIA NIM", openrouter: "OpenRouter", openai: "OpenAI", baton: "Baton" };
-  const STATUS_TEXT = { success: "Done", partial: "Partly done", failed: "Failed", error: "Error", gated: "Answered locally", answered: "Answer" };
+  const STATUS_TEXT = { success: "Done", partial: "Partly done", failed: "Failed", error: "Error", gated: "Answered locally", answered: "Answer", stopped: "Stopped" };
 
   // ---------- icons (static SVG markup; Lucide-style strokes) ----------
   const P = {
@@ -471,6 +481,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     folder: "<path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/>",
     diff: "<path d='M12 3v14M5 10h14M5 21h14'/>",
     play: "<path d='M6 4l14 8-14 8z'/>",
+    stop: "<rect x='6' y='6' width='12' height='12' rx='2'/>",
     refresh: "<path d='M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5'/>",
     code: "<path d='m16 18 6-6-6-6M8 6l-6 6 6 6'/>",
     doc: "<path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/><path d='M14 2v6h6M8 13h8M8 17h6'/>",
@@ -893,6 +904,32 @@ export const UI_HTML = /* html */ `<!doctype html>
   }
   const extOf = (f) => { const m = /[.]([a-z0-9]+)$/i.exec(f); return m ? m[1].slice(0, 4) : "file"; };
 
+  // Partial completion: which planned files exist, a download of what's there, and a resume button.
+  function partialBox(rec) {
+    const tasks = (rec.plan && rec.plan.tasks) || [];
+    const left = tasks.filter((t) => t.status !== "completed");
+    if (!rec.id || !tasks.length || !left.length || ["success", "answered", "gated"].includes(rec.status)) return null;
+    const doneN = tasks.length - left.length;
+    const meter = el("div", { className: "meter" }, el("span"));
+    meter.firstChild.style.width = Math.round(100 * doneN / tasks.length) + "%";
+    const why = rec.status === "stopped" ? "stopped" : "not built (providers busy, rate limited or too slow)";
+    const list = el("ol", { className: "steplist" }, ...tasks.map((t) => {
+      const ok = t.status === "completed";
+      const failedT = t.status === "failed";
+      return el("li", {}, el("span", { className: ok ? "ok" : failedT ? "bad" : "dim", textContent: ok ? "✓" : failedT ? "✗" : "○" }),
+        el("span", {}, "Step " + t.id + " · ", el("code", { textContent: t.targetArtifact }), el("span", { className: "muted", textContent: ok ? (t.assignedModel ? " · " + t.assignedModel : "") : failedT ? " · " + why : " · not started" })));
+    }));
+    const btns = el("div", { className: "pbtns" });
+    if (doneN > 0 && Object.keys(rec.artifacts || {}).length) btns.append(el("a", { className: "btn-s", href: "/api/download/" + rec.id }, icon("download"), "Download partial .zip"));
+    const resume = el("button", { type: "button", className: "btn-s", style: "border-color:var(--accent);color:var(--accent)" }, icon("play"), "Resume from step " + left[0].id);
+    resume.title = "Build the remaining " + left.length + " file" + (left.length === 1 ? "" : "s") + " with the same plan (no new planning call)";
+    resume.onclick = () => runPrompt("Resume from step " + left[0].id + " (" + left.map((t) => t.targetArtifact).join(", ") + ")", { resumeFrom: rec.id, taskType: rec.taskType });
+    btns.append(resume);
+    return el("div", { className: "partialbox" },
+      el("div", { className: "ph" }, el("span", { textContent: doneN + "/" + tasks.length + " files created" }), el("span", { className: "muted", style: "font-weight:400;font-size:12px", textContent: left.length + " left" })),
+      meter, list, btns);
+  }
+
   function botMsg(rec) {
     const body = el("div", { className: "bot" });
     const files = Object.keys(rec.artifacts || {});
@@ -910,11 +947,12 @@ export const UI_HTML = /* html */ `<!doctype html>
       if (rec.parentId && ch) summary = [ch.modified.length ? "Changed " + ch.modified.join(", ") : "", ch.added.length ? "Added " + ch.added.join(", ") : ""].filter(Boolean).join(" · ") || "No files changed";
       else if (rec.summary) summary = "Built " + rec.summary.completedTasks + " of " + rec.summary.totalTasks + " file" + (rec.summary.totalTasks === 1 ? "" : "s");
       body.append(el("div", { className: "summary-line", textContent: summary }));
-      const failed = ((rec.plan && rec.plan.tasks) || []).filter((t) => t.status === "failed").map((t) => t.targetArtifact);
-      if (failed.length) body.append(el("div", { className: "warnbox", textContent: "Not built: " + failed.join(", ") + ". Open Debug to see why each provider failed." }));
+      if (rec.status === "stopped") body.append(el("div", { className: "warnbox", textContent: "Stopped by you. Files finished before that are kept." }));
       const warns = (rec.executionLogs || []).filter((l) => l.event === "execute" && l.message.indexOf("(warning:") > 0);
       if (warns.length) body.append(el("div", { className: "warnbox", textContent: warns.map((l) => l.message.replace("Generated ", "").replace(" successfully", "")).join(" · ") }));
     }
+    const partial = partialBox(rec);
+    if (partial) body.append(partial);
     if (files.length) {
       const changed = new Set(ch && rec.parentId ? [...ch.modified, ...ch.added] : []);
       body.append(el("div", { className: "files" }, ...files.map((f) => {
@@ -932,11 +970,9 @@ export const UI_HTML = /* html */ `<!doctype html>
     if (meta) body.append(el("div", { className: "mmeta", textContent: meta }));
     const actions = el("div", { className: "mactions" });
     const act = (ic, label, fn, primary) => { const b = el("button", { type: "button", className: "act" + (primary ? " primary" : "") }, icon(ic), label); b.onclick = fn; actions.append(b); return b; };
-    if (files.length && rec.status !== "error" && rec.id) actions.append(el("a", { className: "act primary", href: "/api/download/" + rec.id }, icon("download"), "Download"));
+    if (files.length && rec.status !== "error" && rec.id && !partial) actions.append(el("a", { className: "act primary", href: "/api/download/" + rec.id }, icon("download"), "Download"));
     if (rec.parentId && ch && ch.modified.length) act("diff", "Changes", () => { selectedRunId = rec.id; openDebug("run", "diff"); });
     if (rec.status === "answered" || rec.status === "gated") act("copy", "Copy", async () => { try { await navigator.clipboard.writeText(rec.message || ""); toast("Copied"); } catch { toast("Copy failed"); } });
-    const failedFiles = ((rec.plan && rec.plan.tasks) || []).filter((t) => t.status === "failed").map((t) => t.targetArtifact);
-    if (failedFiles.length && files.length && rec.id) act("refresh", "Retry missing files", () => { $("prompt").value = "Create the missing file" + (failedFiles.length === 1 ? "" : "s") + " " + failedFiles.join(", ") + " so it works with the existing files (it was planned earlier but not built)."; autosize(); $("composer").requestSubmit(); }, true);
     if (rec.id) act("bug", "Debug", () => { selectedRunId = rec.id; openDebug("run"); });
     act("edit", "Edit & resend", () => { $("prompt").value = rec.userPrompt || ""; autosize(); $("prompt").focus(); });
     body.append(actions);
@@ -1044,6 +1080,10 @@ export const UI_HTML = /* html */ `<!doctype html>
           const l = e.entry, m = l.message;
           if (l.event === "execute") add("✓", "ok", (m.indexOf("edited in place") >= 0 ? "Edited " : "Wrote ") + m.replace("Generated ", "").replace(" successfully", ""));
           else if (l.event === "plan" && m.indexOf("Answered") === 0) add("✓", "ok", "It's a question: answering directly");
+          else if (l.event === "stop") add("■", "wait", m);
+          else if (l.event === "plan" && m.indexOf("Resuming") === 0) add("↻", "ok", m);
+          else if (l.event === "plan" && m.indexOf("greeting removed") === 0) add("·", "dim", "Greeting removed before planning (saves tokens)");
+          else if (l.event === "failover" && m.indexOf("time limit") >= 0) add("⏱", "bad", m.charAt(0).toUpperCase() + m.slice(1));
           else if (l.event === "failover" && m.indexOf("skipped:") === 0) add("↷", "dim", "Skipped " + (PROVIDER_LABEL[l.provider] || l.provider) + ": " + m.split(": ").slice(2).join(": "));
           else if (l.event === "failover" && (m.indexOf("waiting ") === 0 || m.indexOf("pacing:") === 0)) add("⏱", "wait", (PROVIDER_LABEL[l.provider] || l.provider) + ": " + m);
           else if (l.event === "failover" && m.indexOf("cooling down") >= 0) add("⏱", "wait", m.charAt(0).toUpperCase() + m.slice(1));
@@ -1054,14 +1094,30 @@ export const UI_HTML = /* html */ `<!doctype html>
     };
   }
 
-  $("composer").addEventListener("submit", async (e) => {
+  let stopRun = null;
+  function setSendMode(isRunning) {
+    const b = $("send");
+    b.classList.toggle("stop", isRunning);
+    b.type = isRunning ? "button" : "submit";
+    b.setAttribute("aria-label", isRunning ? "Stop" : "Send");
+    b.title = isRunning ? "Stop: cancel the AI calls now (finished files are kept)" : "Send";
+    b.replaceChildren(icon(isRunning ? "stop" : "send"));
+    b.disabled = false;
+  }
+  $("send").addEventListener("click", (e) => { if (running && stopRun) { e.preventDefault(); stopRun(); } });
+  $("composer").addEventListener("submit", (e) => {
     e.preventDefault();
     if (running) return;
     const userPrompt = $("prompt").value.trim();
     if (!userPrompt) return;
+    runPrompt(userPrompt, {});
+  });
+
+  async function runPrompt(userPrompt, extra) {
+    if (running) return;
     running = true;
-    $("send").disabled = true;
-    const target = continueTarget();
+    setSendMode(true);
+    const target = extra.resumeFrom ? null : continueTarget();
     if (!currentChatId) $("threadInner").replaceChildren();
     $("threadInner").append(userMsg(userPrompt));
     const pending = pendingMsg();
@@ -1074,11 +1130,23 @@ export const UI_HTML = /* html */ `<!doctype html>
     selectedRunId = null;
     renderDebug();
     let es = null;
+    let doneEvent = null;
+    let onDone = null;
+    const ctl = new AbortController();
+    let stopped = false;
+    stopRun = () => {
+      if (stopped) return;
+      stopped = true;
+      $("send").disabled = true;
+      pending.onEvent({ type: "log", entry: { event: "stop", provider: "baton", message: "Stopping..." } });
+      fetch("/api/cancel/" + clientRunId, { method: "POST" }).catch(() => {}).finally(() => ctl.abort());
+    };
     try {
       es = new EventSource("/api/progress/" + clientRunId);
       es.onmessage = (m) => {
         try {
           const ev = JSON.parse(m.data);
+          if (ev.type === "done") { doneEvent = ev; if (onDone) onDone(); }
           pending.onEvent(ev);
           if (ev.type === "call" && ev.call.phase === "progress") return;
           liveEvents.push({ at: new Date().toISOString(), ev });
@@ -1086,19 +1154,24 @@ export const UI_HTML = /* html */ `<!doctype html>
         } catch {}
       };
     } catch {}
-    const payload = { userPrompt, taskType: $("taskType").value, keys: keyPayload(), continueFrom: target ? target.id : undefined, chatId: currentChatId || undefined, clientRunId, providerOrder: order ? order.filter((o) => o.on).map((o) => o.id) : undefined };
+    const payload = { userPrompt, taskType: extra.taskType || $("taskType").value, keys: keyPayload(), continueFrom: target ? target.id : undefined, resumeFrom: extra.resumeFrom, chatId: currentChatId || undefined, clientRunId, providerOrder: order ? order.filter((o) => o.on).map((o) => o.id) : undefined };
     let data = {};
     try {
-      const res = await fetch("/api/orchestrate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const res = await fetch("/api/orchestrate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: ctl.signal });
       try { data = await res.json(); } catch {}
       if (!res.ok && !data.historyId) data = { ...data, status: "error", message: data.message || "HTTP " + res.status };
     } catch (err) {
-      data = { status: "error", message: "Could not reach the Baton server: " + err.message };
+      if (stopped) {
+        // Request aborted by Stop: the server saves what was finished and reports it on the progress stream.
+        if (!doneEvent) await new Promise((r) => { onDone = r; setTimeout(r, 8000); });
+        data = doneEvent && doneEvent.historyId ? { historyId: doneEvent.historyId, status: doneEvent.status } : { status: "error", message: "Stopped. The server did not confirm in time; refresh to see what was saved." };
+      } else data = { status: "error", message: "Could not reach the Baton server: " + err.message };
     } finally {
       pending.stop();
       if (es) setTimeout(() => es.close(), 300);
       running = false;
-      $("send").disabled = false;
+      stopRun = null;
+      setSendMode(false);
     }
     await loadRuns();
     if (data.historyId) {
@@ -1109,8 +1182,9 @@ export const UI_HTML = /* html */ `<!doctype html>
     }
     loadUsage();
     if (debugOpen && debugTab !== "run") renderDebug();
+    if (stopped) toast("Stopped. Finished files are kept.");
     $("prompt").focus();
-  });
+  }
 
   // ===================== Token usage (sidebar) =====================
   let usagePeriod = store.get("baton.usagePeriod") === "allTime" ? "allTime" : "today";

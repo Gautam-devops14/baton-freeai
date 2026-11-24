@@ -15,6 +15,8 @@ export interface HistoryRecord {
   createdAt: string;
   durationMs: number;
   userPrompt: string;
+  /** The request as sent to the models (greeting removed; for a resume, the original request). */
+  goal?: string;
   taskType: TaskType;
   status: RunStatus;
   /** Error message, or the canned reply for a gated prompt. */

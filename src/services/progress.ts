@@ -54,3 +54,23 @@ export function subscribeProgress(id: string, fn: (e: ProgressEvent) => void): (
   c.listeners.add(fn);
   return () => c.listeners.delete(fn);
 }
+
+// ---- Stop button: running requests by clientRunId ----
+
+const running = new Map<string, AbortController>();
+
+/** Remember a running request so POST /api/cancel/:id can stop it. Returns an unregister function. */
+export function registerRun(id: string, controller: AbortController): () => void {
+  running.set(id, controller);
+  return () => {
+    if (running.get(id) === controller) running.delete(id);
+  };
+}
+
+/** Stop a running request. True if one was running. */
+export function cancelRun(id: string): boolean {
+  const c = running.get(id);
+  if (!c) return false;
+  c.abort();
+  return true;
+}

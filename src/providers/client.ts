@@ -15,7 +15,41 @@ import {
   SKIP_REASONS,
 } from "./memory.js";
 
-export const DEFAULT_TIMEOUT_MS = Number(process.env.BATON_PROVIDER_TIMEOUT_MS ?? 30_000);
+export const DEFAULT_TIMEOUT_MS = Number(process.env.BATON_PROVIDER_TIMEOUT_MS ?? 12_000);
+
+/** Hard limit per milestone (plan or file) across every provider, model, retry and wait. */
+export const stepDeadlineMs = () => Number(process.env.BATON_STEP_DEADLINE_MS ?? 45_000);
+
+/** The user pressed Stop (or closed the page). Not a provider problem: never retried or failed over. */
+export class CancelledError extends Error {
+  constructor() {
+    super("stopped by the user");
+    this.name = "CancelledError";
+  }
+}
+
+export const isCancelled = (err: unknown): err is CancelledError => err instanceof CancelledError;
+
+/** Throw if the run was stopped. */
+export function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new CancelledError();
+}
+
+/** Sleep that ends early (throwing CancelledError) when the run is stopped. */
+export function sleepUnlessCancelled(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new CancelledError());
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(new CancelledError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 export type ProviderErrorKind =
   | "model_unavailable"
@@ -104,6 +138,10 @@ export interface ChatOptions {
   onStreamProgress?: (chars: number) => void;
   /** Called when Baton deliberately waits before a call (e.g. pacing under a tokens/minute cap). */
   onWait?: (ms: number, message: string, provider: string, model: string) => void;
+  /** Stops every call and wait at once when the user presses Stop. */
+  signal?: AbortSignal;
+  /** Epoch ms: no new model attempt starts after this, and first-chunk waits are cut to fit. */
+  deadlineAt?: number;
 }
 
 /** First-chunk timeout for models picked by discovery: unknown models get less patience. */
@@ -274,6 +312,11 @@ export async function chatCompletion(
   /** Try each model in order; returns the first success, or undefined if all failed at model level. */
   const tryModels = async (models: string[], callOpts: ChatOptions, discovered: boolean): Promise<ChatResult | undefined> => {
     for (const [i, model] of models.entries()) {
+      throwIfCancelled(callOpts.signal);
+      if (callOpts.deadlineAt !== undefined && Date.now() >= callOpts.deadlineAt) {
+        failures.push({ model, err: new ProviderError(`${target.provider}: step deadline reached`, "timeout", undefined, undefined, [], "step time limit reached") });
+        return undefined;
+      }
       tried.add(model);
       try {
         const { content, usage, reasoningChars } = await requestOnce(target, model, messages, callOpts);
@@ -303,16 +346,17 @@ export async function chatCompletion(
 
   // 2. Overloaded models get one more pass after a pause (last provider in the waterfall only).
   const overloaded = failures.filter((f) => f.err.kind === "overloaded").map((f) => f.model);
-  if (opts.retryOverloaded && overloaded.length && skippedModels.length) {
+  const fitsDeadline = (ms: number) => opts.deadlineAt === undefined || Date.now() + ms < opts.deadlineAt;
+  if (opts.retryOverloaded && overloaded.length && skippedModels.length && fitsDeadline(overloadRetryDelayMs())) {
     const delay = overloadRetryDelayMs();
     Object.assign(skippedModels[skippedModels.length - 1], { next: overloaded[0], afterMs: delay, nextDiscovered: false });
-    await sleep(delay);
+    await sleepUnlessCancelled(delay, opts.signal);
     result = await tryModels(overloaded, opts, false);
     if (result) return result;
   }
 
   // 3. Models discovered from the provider's live list (once per run), for any model-level failure.
-  if (target.modelHints && !target.discoveryTried) {
+  if (target.modelHints && !target.discoveryTried && !(opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt)) {
     target.discoveryTried = true;
     const live = (await listModels(target)).filter((id) => !target.modelFilter || target.modelFilter.test(id));
     const found = rankModels(live, target.modelHints, new Set([...unavailable, ...tried]), 5);
@@ -374,9 +418,10 @@ async function requestOnce(
     const wait = pacerWait(target, model, needed);
     if (wait > 0 && wait <= pacerMaxWaitMs()) {
       opts.onWait?.(wait, `pacing: waiting ${(wait / 1000).toFixed(1)}s to stay under ${target.provider}'s ${limit.toLocaleString("en-US")} tokens/min for ${model}`, target.provider, model);
-      await sleep(wait);
+      await sleepUnlessCancelled(wait, opts.signal);
     }
   }
+  throwIfCancelled(opts.signal);
   const t0 = Date.now();
   opts.onTrace?.({ phase: "start", at: new Date(t0).toISOString(), ...base });
   const finish = (extra: Partial<CallTrace>) => {
@@ -396,6 +441,10 @@ async function requestOnce(
   } catch (err) {
     const pe = err instanceof ProviderError ? err : undefined;
     if (pe) pe.model ??= model;
+    if (isCancelled(err)) {
+      finish({ outcome: "cancelled", detail: "stopped by the user" });
+      throw err;
+    }
     finish({ status: pe?.status, outcome: pe?.kind ?? "error", detail: pe ? pe.reason : String((err as Error)?.message ?? err) });
     throw err;
   }
@@ -442,10 +491,10 @@ const maxCallMs = () => Number(process.env.BATON_MAX_CALL_MS ?? 180_000);
 /**
  * One HTTP call. Streams the reply (stream: true) so timeouts can tell "slow but
  * working" from "stuck":
- *  - no first chunk within timeoutMs (default 30s; 15s for discovered models) -> timeout
+ *  - no first chunk within timeoutMs (default 12s, cut to the step deadline) -> timeout
  *  - a gap longer than BATON_STREAM_IDLE_TIMEOUT_MS (20s) mid-reply          -> timeout
  *  - longer than BATON_MAX_CALL_MS overall (180s)                             -> timeout
- * A model still writing a long file is never cut off at 30s. Providers that
+ * A model still writing a long file is never cut off at 12s. Providers that
  * answer with plain JSON instead of a stream are handled too.
  */
 async function requestUntraced(
@@ -462,7 +511,9 @@ async function requestUntraced(
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
   if (opts.jsonMode && target.supportsJsonMode !== false) body.response_format = { type: "json_object" };
 
-  const firstMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // First-chunk wait: normally 12s, but never past the milestone's deadline (minimum 3s, so a call gets a fair try).
+  const baseFirst = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const firstMs = opts.deadlineAt !== undefined ? Math.max(Math.min(baseFirst, 3000), Math.min(baseFirst, opts.deadlineAt - Date.now())) : baseFirst;
   const idleMs = opts.idleTimeoutMs ?? streamIdleMs();
   const totalMs = maxCallMs();
   const controller = new AbortController();
@@ -478,6 +529,14 @@ async function requestUntraced(
       state.cancel?.(); // also stop a body read that ignores the abort signal
     }
   }, Math.max(10, Math.min(250, firstMs / 2)));
+  // Stop pressed: abort the HTTP request to the provider immediately.
+  const onCancel = () => {
+    state.why = "cancelled";
+    controller.abort();
+    state.cancel?.();
+  };
+  if (opts.signal?.aborted) onCancel();
+  else opts.signal?.addEventListener("abort", onCancel, { once: true });
 
   try {
     const res = await fetch(url, {
@@ -561,6 +620,7 @@ async function requestUntraced(
     if (controller.signal.aborted) throw new ProviderError("aborted", "timeout"); // reader was cancelled by the watchdog
     return finishContent(target, res.status, messages, content, usage ? { usage } : undefined, reasoningChars);
   } catch (err) {
+    if (opts.signal?.aborted) throw new CancelledError();
     if (err instanceof ProviderError && !(err.kind === "timeout" && err.message === "aborted")) throw err;
     if (controller.signal.aborted) {
       throw new ProviderError(`${target.provider} timed out (${state.why || "aborted"})`, "timeout", undefined, undefined, [], state.why || undefined);
@@ -568,6 +628,7 @@ async function requestUntraced(
     throw new ProviderError(`${target.provider} network failure: ${(err as Error).message}`, "network");
   } finally {
     clearInterval(watchdog);
+    opts.signal?.removeEventListener("abort", onCancel);
   }
 }
 

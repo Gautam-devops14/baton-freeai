@@ -14,7 +14,8 @@ import type {
   ProviderTarget,
   TaskType,
 } from "../types.js";
-import { gate } from "./gate.js";
+import { gate, stripGreeting } from "./gate.js";
+import { isCancelled } from "../providers/client.js";
 import { originsFromLogs } from "./context.js";
 import { CLIENT_RUN_ID_RE, progressEmitter } from "./progress.js";
 import { log, sumBreakdown, sumUsage } from "./logging.js";
@@ -98,10 +99,16 @@ export interface OrchestrationErrorInfo {
   executionLogs?: BatonWorkspace["executionLogs"];
 }
 
+export interface OrchestrateOptions {
+  /** Aborted when the user presses Stop or the browser disconnects. */
+  signal?: AbortSignal;
+}
+
 export async function orchestrate(
   req: OrchestrateRequest,
   store: WorkspaceStore,
   history?: HistoryStore,
+  options: OrchestrateOptions = {},
 ): Promise<OrchestrateResponse | GatedResponse> {
   const startedAt = Date.now();
   const taskType = req.taskType ?? "code";
@@ -154,7 +161,7 @@ export async function orchestrate(
   const runId = () => `run_${Date.now()}_${randomBytes(6).toString("hex")}`;
 
   // Stage 1 — zero-token gate, before any state or network.
-  const gated = gate(req.userPrompt);
+  const gated = req.resumeFrom ? null : gate(req.userPrompt);
   if (gated) {
     const historyId = await record({ id: runId(), status: "gated", message: gated.response });
     emit?.({ type: "done", status: "gated", historyId, message: gated.response });
@@ -172,17 +179,26 @@ export async function orchestrate(
   }
 
   // Follow-up: start from the earlier run's files, decisions and request chain.
+  // Resume: same, but also reuse its plan and build only the files it didn't finish.
   let parent: HistoryRecord | undefined;
-  if (req.continueFrom) {
-    parent = history ? await history.get(req.continueFrom) : undefined;
+  const fromId = req.resumeFrom ?? req.continueFrom;
+  if (fromId) {
+    parent = history ? await history.get(fromId) : undefined;
+    const unfinished = parent?.plan?.tasks?.filter((t) => t.status !== "completed") ?? [];
     const problem = !parent
-      ? "The run you are continuing was not found in history (it may have been deleted)."
-      : Object.keys(parent.artifacts).length === 0
-        ? "The run you are continuing has no files to build on. Start a new project instead."
-        : undefined;
+      ? `The run you are ${req.resumeFrom ? "resuming" : "continuing"} was not found in history (it may have been deleted).`
+      : req.resumeFrom
+        ? !parent.plan?.tasks?.length
+          ? "That run has no plan to resume (it stopped before planning). Send the request again instead."
+          : !unfinished.length
+            ? "Every file of that run is already built: nothing to resume."
+            : undefined
+        : Object.keys(parent.artifacts).length === 0
+          ? "The run you are continuing has no files to build on. Start a new project instead."
+          : undefined;
     if (problem) {
       const err = new FollowUpError(problem);
-      const historyId = await record({ id: runId(), status: "error", message: problem, parentId: req.continueFrom });
+      const historyId = await record({ id: runId(), status: "error", message: problem, parentId: fromId });
       Object.assign(err, { historyId });
       emit?.({ type: "done", status: "error", historyId, message: problem });
       throw err;
@@ -190,18 +206,28 @@ export async function orchestrate(
     chatId = parent!.chatId ?? parent!.id; // a follow-up always lives in its parent's chat
   }
 
+  const resuming = Boolean(req.resumeFrom && parent);
   const ws: BatonWorkspace = {
     workspaceId: newWorkspaceId(),
-    userPrompt: req.userPrompt.trim(),
-    taskType: parent && !req.taskType ? parent.taskType : taskType,
+    // Models get the request without a leading greeting; a resume keeps the original request.
+    userPrompt: resuming ? (parent!.goal ?? parent!.userPrompt) : stripGreeting(req.userPrompt.trim()),
+    taskType: parent && (!req.taskType || resuming) ? parent.taskType : taskType,
     metadata: { ...(parent?.plan?.metadata ?? {}) },
-    tasks: [],
+    tasks: resuming
+      ? parent!.plan!.tasks.map((t) => (t.status === "completed" ? { ...t } : { ...t, status: "pending" as const, assignedProvider: undefined, assignedModel: undefined }))
+      : [],
     artifacts: { ...(parent?.artifacts ?? {}) },
     executionLogs: [],
-    ...(parent
+    ...(parent && resuming
       ? {
           parentId: parent.id,
-          conversation: [...(parent.conversation ?? []), parent.userPrompt],
+          conversation: parent.conversation,
+          artifactOrigins: { ...(parent.artifactOrigins ?? originsFromLogs(parent.id, parent.executionLogs)) },
+        }
+      : parent
+      ? {
+          parentId: parent.id,
+          conversation: [...(parent.conversation ?? []), parent.goal ?? parent.userPrompt],
           artifactOrigins: { ...(parent.artifactOrigins ?? originsFromLogs(parent.id, parent.executionLogs)) },
         }
       : {}),
@@ -209,8 +235,14 @@ export async function orchestrate(
   chatId ??= ws.workspaceId;
   ws.chatId = chatId;
   ws.emit = emit;
+  ws.signal = options.signal;
   emit?.({ type: "start", runId: ws.workspaceId, chatId, followUpOf: parent?.id });
+  if (ws.userPrompt !== req.userPrompt.trim() && !resuming) {
+    log(ws, 0, "plan", { provider: "baton", model: "gate" }, `greeting removed before planning: "${ws.userPrompt.slice(0, 80)}"`);
+  }
   const before = new Set(Object.keys(ws.artifacts));
+  // Files finished in an earlier (stopped) run count as that run's work, not this one's.
+  const doneBefore = new Set(ws.tasks.filter((t) => t.status === "completed").map((t) => t.id));
   /** Fields every record of this run shares. */
   const runFields = () => ({
     parentId: ws.parentId,
@@ -220,14 +252,22 @@ export async function orchestrate(
     plan: { metadata: ws.metadata, tasks: ws.tasks },
     calls: ws.calls,
     chatId: ws.chatId,
+    goal: ws.userPrompt,
     breakdown: sumBreakdown(ws.calls),
   });
 
   try {
     const targets = buildTargets(keys, taskType, order);
 
-    // Stage 2 — planning (Gemini as architect, Groq as safety net).
-    await planWorkspace(ws, targets.planner);
+    // Stage 2 — planning (skipped when resuming: the earlier plan is reused).
+    if (resuming) {
+      const left = ws.tasks.filter((t) => t.status !== "completed");
+      log(ws, 0, "plan", { provider: "baton", model: "resume" },
+        `Resuming from step ${left[0].id}: reusing the earlier plan, ${ws.tasks.length - left.length}/${ws.tasks.length} files already built (no planning call)`);
+      ws.emit?.({ type: "plan", tasks: ws.tasks.map((t) => ({ id: t.id, targetArtifact: t.targetArtifact, title: t.title })) });
+    } else {
+      await planWorkspace(ws, targets.planner);
+    }
 
     // A question: the planner already answered it. Nothing to build.
     if (ws.answer !== undefined) {
@@ -265,9 +305,35 @@ export async function orchestrate(
 
     // Stage 3 — relay execution with failover.
     const allDone = await runRelay(ws, { targets: targets.relay });
-
     const completed = ws.tasks.filter((t) => t.status === "completed");
-    const status: OrchestrateResponse["status"] = allDone ? "success" : completed.length > 0 ? "partial" : "failed";
+    return await finishBuild(allDone ? "success" : completed.length > 0 ? "partial" : "failed");
+  } catch (err) {
+    // Stop pressed: keep every file finished so far, like a partial run, so it can be downloaded or resumed.
+    if (isCancelled(err)) {
+      for (const t of ws.tasks) if (t.status === "in_progress") t.status = "pending";
+      log(ws, ws.tasks.length + 1, "failover", { provider: "baton", model: "relay" }, "stopped by the user; finished files are kept");
+      return await finishBuild("stopped", "Stopped by you.");
+    }
+    const message = (err as Error)?.message ?? String(err);
+    const historyId = await record({
+      id: ws.workspaceId,
+      status: "error",
+      message,
+      usage: sumUsage(ws.executionLogs), // a failed run can still have spent tokens (e.g. an unusable plan)
+      ...runFields(),
+      executionLogs: ws.executionLogs,
+      // A follow-up that failed before changing anything shouldn't look like it produced the old files.
+      artifacts: ws.tasks.some((t) => t.status === "completed") ? ws.artifacts : parent ? {} : ws.artifacts,
+    });
+    if (err && typeof err === "object") {
+      Object.assign(err, { historyId, executionLogs: ws.executionLogs } satisfies OrchestrationErrorInfo);
+    }
+    emit?.({ type: "done", status: "error", historyId, message });
+    throw err;
+  }
+
+  async function finishBuild(status: OrchestrateResponse["status"], message?: string): Promise<OrchestrateResponse> {
+    const completed = ws.tasks.filter((t) => t.status === "completed");
     log(
       ws,
       ws.tasks.length + 1,
@@ -285,13 +351,15 @@ export async function orchestrate(
       artifactsGenerated: completed.map((t) => t.targetArtifact),
     };
     const usage = sumUsage(ws.executionLogs);
+    const builtNow = completed.filter((t) => !doneBefore.has(t.id)).map((t) => t.targetArtifact);
     const changes = {
-      modified: completed.map((t) => t.targetArtifact).filter((p) => before.has(p)),
-      added: completed.map((t) => t.targetArtifact).filter((p) => !before.has(p)),
+      modified: builtNow.filter((p) => before.has(p)),
+      added: builtNow.filter((p) => !before.has(p)),
     };
     const historyId = await record({
       id: ws.workspaceId,
       status,
+      message,
       summary,
       usage,
       changes,
@@ -300,9 +368,10 @@ export async function orchestrate(
       artifacts: ws.artifacts,
     });
 
-    emit?.({ type: "done", status, historyId });
+    emit?.({ type: "done", status, historyId, message });
     return {
       status,
+      ...(message ? { message } : {}),
       workspaceId: ws.workspaceId,
       historyId,
       taskType,
@@ -319,22 +388,5 @@ export async function orchestrate(
       breakdown: sumBreakdown(ws.calls),
       downloadUrl: `/api/download/${ws.workspaceId}`,
     };
-  } catch (err) {
-    const message = (err as Error)?.message ?? String(err);
-    const historyId = await record({
-      id: ws.workspaceId,
-      status: "error",
-      message,
-      usage: sumUsage(ws.executionLogs), // a failed run can still have spent tokens (e.g. an unusable plan)
-      ...runFields(),
-      executionLogs: ws.executionLogs,
-      // A follow-up that failed before changing anything shouldn't look like it produced the old files.
-      artifacts: ws.tasks.some((t) => t.status === "completed") ? ws.artifacts : parent ? {} : ws.artifacts,
-    });
-    if (err && typeof err === "object") {
-      Object.assign(err, { historyId, executionLogs: ws.executionLogs } satisfies OrchestrationErrorInfo);
-    }
-    emit?.({ type: "done", status: "error", historyId, message });
-    throw err;
   }
 }

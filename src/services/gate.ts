@@ -60,3 +60,22 @@ export function gate(prompt: string): GatedResponse | null {
 
   return null;
 }
+
+// A greeting in front of a real request ("Hi Baton, can you build...", "Hey, write a...").
+// The greeting is dropped before planning so no tokens are spent on it.
+const GREETING_PREFIX_RE =
+  /^\s*(?:(?:hi|hello|hey|hiya|heya|yo|greetings|howdy|good\s+(?:morning|afternoon|evening))(?:\s+(?:there|baton|team|buddy|friend|all))*\s*[,!.:;–—-]*\s+)+/i;
+
+/**
+ * Remove a leading greeting from a prompt that also contains a request. Returns
+ * the prompt unchanged when there is no greeting, when nothing would be left, or
+ * for phrases like "hello world app" where the greeting word is part of the request.
+ */
+export function stripGreeting(prompt: string): string {
+  const m = GREETING_PREFIX_RE.exec(prompt);
+  if (!m) return prompt;
+  const rest = prompt.slice(m[0].length).trim();
+  if (!rest) return prompt;
+  if (/^hello\b/i.test(prompt.trim()) && /^world\b/i.test(rest) && !/^hello\s*[,!.]/i.test(prompt.trim())) return prompt;
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
