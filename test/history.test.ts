@@ -83,7 +83,8 @@ test("every prompt is recorded: gated, missing keys, and planning failures (with
   assert.match(body.message, /Tip: adding a Groq, NVIDIA NIM or OpenRouter key/);
 
   const runs = (await app.inject({ method: "GET", url: "/api/history" })).json().runs;
-  assert.deepEqual(runs.map((r: any) => r.status), ["error", "error", "gated"], "newest first");
+  // (Runs saved within the same millisecond have no defined order, so compare as a set.)
+  assert.deepEqual(runs.map((r: any) => r.status).sort(), ["error", "error", "gated"]);
   const rec = (await app.inject({ method: "GET", url: `/api/history/${body.historyId}` })).json();
   assert.equal(rec.status, "error");
   assert.match(rec.message, /Planning failed/);

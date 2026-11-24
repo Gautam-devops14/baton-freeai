@@ -762,7 +762,7 @@ export const UI_HTML = /* html */ `<!doctype html>
           }
         } else if (e.type === "log") {
           const l = e.entry;
-          if (l.event === "execute") add("✓", "ok", "Wrote " + l.message.replace("Generated ", "").replace(" successfully", ""));
+          if (l.event === "execute") add("✓", "ok", (l.message.indexOf("edited in place") >= 0 ? "Edited " : "Wrote ") + l.message.replace("Generated ", "").replace(" successfully", ""));
           else if (l.event === "plan" && l.message.indexOf("Answered") === 0) add("✓", "ok", "It's a question: answering directly, no files");
           else if (l.event === "failover" && l.message.indexOf("skipped:") === 0) add("↷", "dim", "Skipped " + (PROVIDER_LABEL[l.provider] || l.provider) + ": " + l.message.split(": ").slice(2).join(": "));
           else if (l.event === "failover" && l.message.indexOf("waiting ") === 0) add("⏱", "wait", (PROVIDER_LABEL[l.provider] || l.provider) + ": " + l.message);

@@ -8,6 +8,7 @@ import { busyUntilFor, splitBusy } from "../providers/memory.js";
 import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 import { extractArtifactBody } from "./sanitize.js";
 import { outlineFile } from "./outline.js";
+import { applyEdits } from "./edits.js";
 import { estimateTokens } from "../providers/client.js";
 import { contextFile, originLabel, recordContext } from "./context.js";
 
@@ -34,7 +35,27 @@ const ROLE_BY_TYPE: Record<BatonWorkspace["taskType"], string> = {
   analysis: "a rigorous data analyst. Write complete, reproducible analysis artifacts",
 };
 
-export function buildTaskPrompt(ws: BatonWorkspace, task: BatonTask): { messages: ChatMessage[]; sections: TaskPromptSections } {
+/** Follow-up edits: files at least this big are changed with edit blocks instead of being rewritten in full. */
+const editMinChars = () => Number(process.env.BATON_EDIT_MIN_CHARS ?? 1500);
+
+/** Should this step ask for edit blocks (only what changes) rather than the whole file? */
+export function useEditMode(ws: BatonWorkspace, task: BatonTask): boolean {
+  const current = ws.artifacts[task.targetArtifact];
+  return process.env.BATON_EDIT_MODE !== "off" && current !== undefined && current.length >= editMinChars();
+}
+
+const EDIT_FORMAT =
+  "Reply ONLY with one or more edit blocks in exactly this format, and nothing else:\n" +
+  "<<<<<<< SEARCH\n(exact lines copied from the current file)\n=======\n(the new lines)\n>>>>>>> REPLACE\n" +
+  "SEARCH must match the current file exactly, including indentation. Keep each block small: include only the lines " +
+  "that change plus a line or two around them so the match is unique. If the change rewrites most of the file, reply " +
+  "with the complete new file in a single fenced code block instead.";
+
+export function buildTaskPrompt(
+  ws: BatonWorkspace,
+  task: BatonTask,
+  mode: "full" | "edit" = "full",
+): { messages: ChatMessage[]; sections: TaskPromptSections } {
   const decisions = Object.entries(ws.metadata)
     .filter(([, v]) => v !== undefined && v !== "")
     .map(([k, v]) => `- ${k}: ${v}`)
@@ -78,12 +99,21 @@ export function buildTaskPrompt(ws: BatonWorkspace, task: BatonTask): { messages
       current !== undefined &&
         `## Current contents of \`${task.targetArtifact}\` (rewrite the WHOLE file, applying the change)\n${current}`,
     ],
-    ["instructions", `## Your assignment\nProduce the full contents of \`${task.targetArtifact}\`: ${task.title}`],
+    [
+      "instructions",
+      mode === "edit"
+        ? `## Your assignment\nChange \`${task.targetArtifact}\`: ${task.title}\n\n${EDIT_FORMAT}`
+        : `## Your assignment\nProduce the full contents of \`${task.targetArtifact}\`: ${task.title}`,
+    ],
   ];
   const system =
     `You are ${ROLE_BY_TYPE[ws.taskType]}. You are one stage in a relay: earlier artifacts were written by other ` +
-    "models and are authoritative. Output ONLY the complete contents of the requested artifact inside a single " +
-    "fenced code block. No explanations before or after it, no placeholders, no ellipses.";
+    "models and are authoritative. " +
+    (mode === "edit"
+      ? "Output ONLY edit blocks that change the current file (or, for a near-total rewrite, the complete file in one " +
+        "fenced code block). No explanations."
+      : "Output ONLY the complete contents of the requested artifact inside a single fenced code block. No " +
+        "explanations before or after it, no placeholders, no ellipses.");
   const used = parts.filter((p): p is [keyof TaskPromptSections, string] => Boolean(p[1]));
   const sections: TaskPromptSections = { instructions: system.length, request: 0, context: 0 };
   for (const [kind, text] of used) sections[kind] += text.length;
@@ -157,7 +187,8 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
   for (const task of ws.tasks) {
     if (task.status === "completed") continue;
     task.status = "in_progress";
-    const { messages, sections } = buildTaskPrompt(ws, task);
+    const editMode = useEditMode(ws, task);
+    const { messages, sections } = buildTaskPrompt(ws, task, editMode ? "edit" : "full");
     recordContext(
       ws,
       {
@@ -195,8 +226,33 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
           ...traceFor(ws, task.id),
         });
         logModelSwaps(ws, task.id, target.provider, result.skippedModels);
-        ws.artifacts[task.targetArtifact] = extractArtifactBody(result.content, task.targetArtifact);
-        attachBreakdown(ws, task.id, result.model, buildCallBreakdown(result.usage, sections, ws.artifacts[task.targetArtifact].length, result.content.length));
+        let note = "";
+        if (editMode) {
+          const current = ws.artifacts[task.targetArtifact];
+          const applied = applyEdits(current, result.content);
+          const asFile = extractArtifactBody(result.content, task.targetArtifact);
+          if (applied.ok) {
+            ws.artifacts[task.targetArtifact] = applied.content!;
+            note = ` (edited in place: ${applied.edits} change${applied.edits === 1 ? "" : "s"})`;
+            attachBreakdown(ws, task.id, result.model, buildCallBreakdown(result.usage, sections, applied.writtenChars, result.content.length));
+          } else if (!/<<<<<<< SEARCH/.test(result.content) && asFile.length >= current.length * 0.6) {
+            // The model chose to send the whole new file (allowed for big changes).
+            ws.artifacts[task.targetArtifact] = asFile;
+            attachBreakdown(ws, task.id, result.model, buildCallBreakdown(result.usage, sections, asFile.length, result.content.length));
+          } else {
+            // Edits didn't apply: ask the same model for the full file once (safe fallback).
+            log(ws, task.id, "failover", { ...target, model: result.model }, `edit blocks didn't apply (${applied.error}); asking for the full file instead`, result.usage);
+            attachBreakdown(ws, task.id, result.model, { wasted: result.usage.totalTokens });
+            const full = buildTaskPrompt(ws, task, "full");
+            const retry = await chatCompletion({ ...target, model: result.model, fallbackModels: [] }, full.messages, { ...traceFor(ws, task.id) });
+            ws.artifacts[task.targetArtifact] = extractArtifactBody(retry.content, task.targetArtifact);
+            attachBreakdown(ws, task.id, retry.model, buildCallBreakdown(retry.usage, full.sections, ws.artifacts[task.targetArtifact].length, retry.content.length));
+            result.usage = retry.usage;
+          }
+        } else {
+          ws.artifacts[task.targetArtifact] = extractArtifactBody(result.content, task.targetArtifact);
+          attachBreakdown(ws, task.id, result.model, buildCallBreakdown(result.usage, sections, ws.artifacts[task.targetArtifact].length, result.content.length));
+        }
         task.status = "completed";
         task.assignedProvider = target.provider;
         task.assignedModel = result.model;
@@ -206,7 +262,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
           runId: ws.workspaceId,
           step: task.id,
         };
-        log(ws, task.id, "execute", { ...target, model: result.model }, `Generated ${task.targetArtifact} successfully`, result.usage);
+        log(ws, task.id, "execute", { ...target, model: result.model }, `Generated ${task.targetArtifact} successfully${note}`, result.usage);
         return undefined;
       } catch (err) {
         const pe =

@@ -100,6 +100,16 @@ While the server runs, Baton remembers per provider account (keyed by a hash of 
   * no working models, including discovered ones: 1 h (`BATON_NO_MODELS_SKIP_MS`)
 * Discovery on NVIDIA only considers chat/instruct models. NVIDIA also lists code-completion models such as `starcoder2`, which its chat endpoint answers with 404. Up to 5 candidates are tried.
 
+## Questions get answers, not files
+
+Before planning, the planner decides whether your message asks for **work** or is a **question**. Questions ("yes or no only", "explain this code", "what is RAG?") get a direct answer in the format and length you ask for, from one call. Nothing is built and the project's files stay as they were. In a follow-up the model can see the project's files, so it can explain them. Code requests are told to produce something that **runs**, not requirements or architecture documents (unless you ask for documents).
+
+## Cost savers
+
+* **Fewest files:** the planner uses 1–4 files, as few as the job needs (a simple page can be a single `index.html`).
+* **Less context:** each file's plan entry lists which earlier files it `uses`. A build step gets those in full and every other file as a short **outline** (exports, functions, DOM ids, classes, CSS selectors, headings). Without a list, files go in full up to `BATON_CONTEXT_FULL_CHARS` (12k chars, newest first). Context views and exports mark outlined files.
+* **Edit, don't rewrite:** in follow-ups, files of at least `BATON_EDIT_MIN_CHARS` (1,500 chars) are changed with small SEARCH/REPLACE edit blocks instead of a full rewrite, so the model only writes what changes. If a block doesn't match, Baton asks the same model for the full file once; the unusable reply counts as "wasted" in the token breakdown. `BATON_EDIT_MODE=off` turns this off.
+
 ## Every model before the next provider
 
 Rate limits, overloads and timeouts are usually per model, so Baton tries **all of a provider's models** before moving to the next provider: first the configured list, then (once per run) models it discovers from the provider's live list. Only account-level problems skip a provider at once, because no other model would help: key rejected, no credit, a daily cap, or the host unreachable. The log shows each model tried (`HTTP 429 rate limit detected; retrying with llama-3.3-70b-versatile`). NVIDIA's defaults come from its current catalogue: `nvidia/nemotron-3-ultra-550b-a55b`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `deepseek-ai/deepseek-v4.1-flash`.

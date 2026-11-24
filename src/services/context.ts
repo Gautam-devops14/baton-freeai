@@ -59,7 +59,7 @@ export function originsFromLogs(
 ): BatonWorkspace["artifactOrigins"] {
   const out: NonNullable<BatonWorkspace["artifactOrigins"]> = {};
   for (const l of logs) {
-    const m = l.event === "execute" ? /^Generated (.+) successfully$/.exec(l.message) : null;
+    const m = l.event === "execute" ? /^Generated (.+?) successfully(?: \(|$)/.exec(l.message) : null;
     if (m) out[m[1]] = { provider: l.provider, model: l.model, runId, step: l.step };
   }
   return out;
