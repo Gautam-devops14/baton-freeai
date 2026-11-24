@@ -9,6 +9,8 @@ import { extractArtifactBody } from "./sanitize.js";
 
 const DEFAULT_COOLDOWN_MS = 60_000;
 
+const PROVIDER_NAMES: Record<string, string> = { google: "Google AI Studio", groq: "Groq", openai: "OpenAI" };
+
 const ROLE_BY_TYPE: Record<BatonWorkspace["taskType"], string> = {
   code: "a senior software engineer. Write complete, runnable source code",
   document: "a meticulous technical writer. Write complete, well-structured Markdown prose",
@@ -100,7 +102,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
           "failover",
           target,
           next
-            ? `${pe.reason}; passing baton to ${next.provider === "google" ? "Google AI Studio" : next.provider}`
+            ? `${pe.reason}; passing baton to ${PROVIDER_NAMES[next.provider] ?? next.provider}`
             : `${pe.reason}; no providers left for ${task.targetArtifact}`,
         );
       }

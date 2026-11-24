@@ -1,6 +1,6 @@
 # Baton
 
-A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project with Gemini 3.8 Flash, builds each artifact on Groq, and when Groq returns a 429 or times out it hands the work to Gemini. The task keeps going without restarting, because all context lives in a shared workspace rather than in any one model's chat history.
+A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project with Gemini 3.8 Flash, builds each artifact on Groq, and when Groq returns a 429 or times out it hands the work to Gemini. An optional OpenAI key adds a paid last-resort tier. The task keeps going without restarting, because all context lives in a shared workspace rather than in any one model's chat history.
 
 ## Quick start
 
@@ -13,7 +13,7 @@ npm run build && npm start
 
 ## Web UI
 
-Open http://localhost:3000, paste your Groq and/or Gemini key, describe a project and click **Run**. You'll see the relay log, each generated file, and a .zip download link. Keys are only stored in your browser if you tick "Remember keys".
+Open http://localhost:3000, paste your Groq, Gemini and/or OpenAI key, describe a project and click **Run**. You'll see the relay log, each generated file, and a .zip download link. Keys are only stored in your browser if you tick "Remember keys".
 
 ## API
 
@@ -23,12 +23,14 @@ Open http://localhost:3000, paste your Groq and/or Gemini key, describe a projec
 curl -s localhost:3000/api/orchestrate -H 'content-type: application/json' -d '{
   "userPrompt": "Create an Express.js authentication service with JWT and bcrypt",
   "taskType": "code",
-  "keys": { "groqApiKey": "gsk_...", "geminiApiKey": "AIza..." }
+  "keys": { "groqApiKey": "gsk_...", "geminiApiKey": "AIza...", "openaiApiKey": "sk-..." }
 }'
 ```
 
 * `taskType`: `code` (default), `document`, or `analysis`.
 * `keys`: at least one is required (BYOK). With only one key, Baton runs single-provider and loses failover.
+  * Order for building files: Groq → Gemini → OpenAI. Order for planning: Gemini → Groq → OpenAI.
+  * OpenAI has no free API tier, so its key needs billing. It is always tried last, so it only costs money when the free providers fail. Default models: `gpt-5-mini`, then `gpt-4.1-mini` (override with `OPENAI_MODELS`).
 * Returns the spec §4.1 payload. `status` is `success`, `partial` (some tasks failed on every provider), or `failed`.
 * Chit-chat and commands (`hi`, `thanks`, `help`, `status`, …) return `{"status":"gated", ...}` immediately. They need no keys and make no provider calls.
 * Errors: `400 missing_keys` / schema violations, `502 planning_failed`.

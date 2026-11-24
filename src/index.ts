@@ -23,6 +23,7 @@ const orchestrateSchema = {
         properties: {
           groqApiKey: { type: "string", maxLength: 512 },
           geminiApiKey: { type: "string", maxLength: 512 },
+          openaiApiKey: { type: "string", maxLength: 512 },
         },
       },
     },

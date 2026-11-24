@@ -43,6 +43,7 @@ export interface BatonWorkspace {
 export interface ProviderKeys {
   groqApiKey?: string;
   geminiApiKey?: string;
+  openaiApiKey?: string;
 }
 
 export interface OrchestrateRequest {
@@ -88,6 +89,8 @@ export interface ProviderTarget {
   fallbackModels?: string[];
   /** Filled in at runtime: models this provider has rejected as unavailable during the current run. */
   unavailableModels?: Set<string>;
+  /** False for providers/models that reject a custom temperature (e.g. OpenAI GPT-5). Default true. */
+  sendTemperature?: boolean;
   baseUrl: string;
   apiKey: string;
 }

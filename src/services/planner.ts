@@ -134,7 +134,7 @@ export class PlanningError extends Error {
     const kind = cause instanceof ProviderError ? cause.kind : undefined;
     const parts = [`Planning failed (${attempts.join("; ") || (cause as Error)?.message || cause}).`];
     if (kind && HINTS[kind]) parts.push(`Likely cause: ${HINTS[kind]}.`);
-    if (providerCount === 1) parts.push("Tip: add both a Groq and a Gemini key so Baton can switch providers when one is down.");
+    if (providerCount === 1) parts.push("Tip: add a second provider key (Groq, Gemini or OpenAI) so Baton can switch providers when one is down.");
     super(parts.join(" "));
     this.name = "PlanningError";
   }

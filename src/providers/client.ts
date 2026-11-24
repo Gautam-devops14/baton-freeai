@@ -180,8 +180,8 @@ async function requestOnce(
   const body: Record<string, unknown> = {
     model,
     messages,
-    temperature: opts.temperature ?? 0.2,
   };
+  if (target.sendTemperature !== false) body.temperature = opts.temperature ?? 0.2;
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
   if (opts.jsonMode) body.response_format = { type: "json_object" };
 

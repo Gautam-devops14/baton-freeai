@@ -3,6 +3,7 @@
 import { randomBytes } from "node:crypto";
 import { geminiTarget } from "../providers/gemini.js";
 import { groqTarget } from "../providers/groq.js";
+import { openaiTarget } from "../providers/openai.js";
 import type {
   BatonWorkspace,
   GatedResponse,
@@ -19,7 +20,7 @@ import type { WorkspaceStore } from "./storage.js";
 
 export class MissingKeysError extends Error {
   constructor() {
-    super("Provide at least one of keys.groqApiKey or keys.geminiApiKey (BYOK).");
+    super("Provide at least one of keys.groqApiKey, keys.geminiApiKey or keys.openaiApiKey (BYOK).");
     this.name = "MissingKeysError";
   }
 }
@@ -40,10 +41,12 @@ export function buildTargets(
 ): { planner: ProviderTarget[]; relay: ProviderTarget[] } {
   const gemini = keys.geminiApiKey ? geminiTarget(keys.geminiApiKey) : undefined;
   const groq = keys.groqApiKey ? groqTarget(keys.groqApiKey, taskType) : undefined;
+  const openai = keys.openaiApiKey ? openaiTarget(keys.openaiApiKey) : undefined;
   const present = (t: (ProviderTarget | undefined)[]) => t.filter((x): x is ProviderTarget => Boolean(x));
   return {
-    planner: present([gemini, groq]), // Gemini is the architect, Groq the safety net
-    relay: present([groq, gemini]), // Groq is the sprint tier, Gemini the fallback
+    // OpenAI is paid, so it is always the last resort.
+    planner: present([gemini, groq, openai]), // Gemini is the architect, Groq the safety net
+    relay: present([groq, gemini, openai]), // Groq is the sprint tier, Gemini the fallback
   };
 }
 
@@ -59,8 +62,9 @@ export async function orchestrate(
   const keys = {
     groqApiKey: req.keys?.groqApiKey?.trim() || undefined,
     geminiApiKey: req.keys?.geminiApiKey?.trim() || undefined,
+    openaiApiKey: req.keys?.openaiApiKey?.trim() || undefined,
   };
-  if (!keys.groqApiKey && !keys.geminiApiKey) throw new MissingKeysError();
+  if (!keys.groqApiKey && !keys.geminiApiKey && !keys.openaiApiKey) throw new MissingKeysError();
 
   const ws: BatonWorkspace = {
     workspaceId: newWorkspaceId(),

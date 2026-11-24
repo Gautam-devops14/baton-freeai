@@ -218,7 +218,7 @@ test("Gemini-only and overloaded: retries once, then a clear 502 with a hint", a
   const msg = res.json().message;
   assert.match(msg, /google: HTTP 503 model overloaded/);
   assert.match(msg, /servers are busy right now/);
-  assert.match(msg, /add both a Groq and a Gemini key/);
+  assert.match(msg, /add a second provider key/);
   assert.equal(calls.length, 4, "2 models x 2 passes");
 });
 
@@ -236,4 +236,55 @@ test("Gemini-only: overloaded first, recovers on the retry pass", async () => {
     "Project decomposed into 3 milestones",
   ]);
   process.env.BATON_OVERLOAD_RETRY_MS = "0";
+});
+
+// ---- OpenAI (optional, paid, last resort) ----
+
+const isOpenAI = (url: string) => url.includes("api.openai.com");
+
+test("OpenAI target: last in the waterfall, model fallback list, no temperature sent", async () => {
+  const { buildTargets } = await import("../src/services/orchestrator.js");
+  const t = buildTargets({ groqApiKey: "g", geminiApiKey: "m", openaiApiKey: "o" }, "code");
+  assert.deepEqual(t.planner.map((x) => x.provider), ["google", "groq", "openai"]);
+  assert.deepEqual(t.relay.map((x) => x.provider), ["groq", "google", "openai"]);
+  const openai = t.relay[2];
+  assert.equal(openai.baseUrl, "https://api.openai.com/v1");
+  assert.equal(openai.model, "gpt-5-mini");
+  assert.deepEqual(openai.fallbackModels, ["gpt-4.1-mini"]);
+
+  let sent: any;
+  installFetch(({ body }) => ((sent = body), completion("ok")));
+  const { chatCompletion } = await import("../src/providers/client.js");
+  await chatCompletion(openai, [], { temperature: 0.1 });
+  assert.equal("temperature" in sent, false);
+});
+
+test("OpenAI only used after Groq and Gemini both fail", async () => {
+  installFetch(({ url, body }) => {
+    if (isGemini(url) && isPlanner(body)) return completion(PLAN);
+    if (isOpenAI(url)) return completion("from openai");
+    return rateLimited(); // Groq and Gemini execution both rate limited
+  });
+  const out = (await buildServer().inject({
+    method: "POST", url: "/api/orchestrate",
+    payload: { userPrompt: "Build an auth service", keys: { ...KEYS, openaiApiKey: "sk-test" } },
+  })).json();
+  assert.equal(out.status, "success");
+  assert.deepEqual(out.executionLogs.filter((l: any) => l.step === 1).map((l: any) => `${l.event}:${l.provider}`), [
+    "failover:groq", "failover:google", "execute:openai",
+  ]);
+  assert.match(out.executionLogs.find((l: any) => l.step === 1 && l.provider === "google").message, /passing baton to OpenAI/);
+  assert.equal(out.artifacts["package.json"], "from openai\n");
+});
+
+test("OpenAI key alone is enough to run", async () => {
+  installFetch(({ url, body }) => {
+    assert.ok(isOpenAI(url), "only OpenAI should be called");
+    return isPlanner(body) ? completion(PLAN) : completion("ok");
+  });
+  const out = (await buildServer().inject({
+    method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: { openaiApiKey: "sk-test" } },
+  })).json();
+  assert.equal(out.status, "success");
+  assert.equal(out.executionLogs[0].provider, "openai");
 });

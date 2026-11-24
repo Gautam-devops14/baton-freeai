@@ -24,6 +24,7 @@ export const UI_HTML = /* html */ `<!doctype html>
   .sub { color: var(--muted); margin: 0 0 24px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
   label { display: block; font-weight: 600; font-size: 13px; margin: 0 0 6px; }
+  .opt { font-weight: 400; color: var(--muted); }
   textarea, input, select { width: 100%; font: inherit; color: var(--text); background: var(--bg);
     border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
   textarea { min-height: 96px; resize: vertical; }
@@ -57,7 +58,7 @@ export const UI_HTML = /* html */ `<!doctype html>
 <body>
 <main>
   <h1>Baton</h1>
-  <p class="sub">Describe a project. Baton plans it, builds each file on Groq, and fails over to Gemini when a provider hits its limit.</p>
+  <p class="sub">Describe a project. Baton plans it, builds each file on Groq, and fails over to Gemini (then OpenAI, if you add a key) when a provider hits its limit.</p>
 
   <form class="panel" id="form">
     <label for="prompt">What should Baton build?</label>
@@ -72,6 +73,9 @@ export const UI_HTML = /* html */ `<!doctype html>
           <option value="analysis">Analysis</option>
         </select>
       </div>
+    </div>
+
+    <div class="row">
       <div>
         <label for="groq">Groq API key</label>
         <input id="groq" type="password" autocomplete="off" placeholder="gsk_..." />
@@ -79,6 +83,10 @@ export const UI_HTML = /* html */ `<!doctype html>
       <div>
         <label for="gemini">Gemini API key</label>
         <input id="gemini" type="password" autocomplete="off" placeholder="AIza..." />
+      </div>
+      <div>
+        <label for="openai">OpenAI API key <span class="opt">(optional, paid)</span></label>
+        <input id="openai" type="password" autocomplete="off" placeholder="sk-..." />
       </div>
     </div>
     <label class="check"><input type="checkbox" id="remember" /> Remember keys in this browser</label>
@@ -115,6 +123,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     $("remember").checked = true;
     $("groq").value = store.get("baton.groq") || "";
     $("gemini").value = store.get("baton.gemini") || "";
+    $("openai").value = store.get("baton.openai") || "";
   }
 
   const el = (tag, props = {}, ...kids) => {
@@ -166,6 +175,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     store.set("baton.remember", remember ? "1" : null);
     store.set("baton.groq", remember ? $("groq").value : null);
     store.set("baton.gemini", remember ? $("gemini").value : null);
+    store.set("baton.openai", remember ? $("openai").value : null);
 
     $("go").disabled = true;
     $("results").hidden = $("logPanel").hidden = $("artifactPanel").hidden = true;
@@ -177,11 +187,15 @@ export const UI_HTML = /* html */ `<!doctype html>
         body: JSON.stringify({
           userPrompt: $("prompt").value,
           taskType: $("taskType").value,
-          keys: { groqApiKey: $("groq").value.trim() || undefined, geminiApiKey: $("gemini").value.trim() || undefined },
+          keys: {
+            groqApiKey: $("groq").value.trim() || undefined,
+            geminiApiKey: $("gemini").value.trim() || undefined,
+            openaiApiKey: $("openai").value.trim() || undefined,
+          },
         }),
       });
       const data = await res.json();
-      if (data.error === "missing_keys") throw new Error("Add a Groq or Gemini API key (or both) to run a project.");
+      if (data.error === "missing_keys") throw new Error("Add at least one API key (Groq, Gemini or OpenAI) to run a project.");
       if (!res.ok) throw new Error(data.message || ("HTTP " + res.status));
       setStatus("");
       render(data);
