@@ -85,11 +85,25 @@ export const UI_HTML = /* html */ `<!doctype html>
   .actions .linkbtn.danger { color: var(--muted); }
   .keys { grid-template-columns: 1fr; }
   @media (min-width: 600px) { .keys { grid-template-columns: 1fr 1fr; } }
-  .tokens { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; margin-top: 12px; font-size: 14px; }
+  .tokens { display: flex; flex-wrap: wrap; flex-direction: row; gap: 6px 14px; align-items: baseline; margin-top: 12px; font-size: 14px; }
   .tokens strong { font-variant-numeric: tabular-nums; }
   .tokens .by { color: var(--muted); font-size: 13px; }
   .tok { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .alltime { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
+  .utable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .utable th, .utable td { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; vertical-align: top; }
+  .utable th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  .utable th:first-child, .utable td:first-child { text-align: left; overflow-wrap: anywhere; }
+  .utable td .prov { display: block; color: var(--muted); font-size: 11px; }
+  .utable tfoot td { font-weight: 600; border-bottom: 0; }
+  .usage { border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 12px; }
+  .usage .head { margin-bottom: 4px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { margin: 0; border: 0; border-radius: 0; background: none; color: var(--muted); font-size: 12px; font-weight: 600; padding: 3px 9px; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .usage .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  .usage .utable { font-size: 12px; }
+  .usage .utable th, .usage .utable td { padding: 4px 3px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -99,12 +113,21 @@ export const UI_HTML = /* html */ `<!doctype html>
   <p class="sub">Describe a project. Baton plans it, builds each file on Groq, and fails over to Gemini, NVIDIA NIM and then OpenAI (for whichever keys you add) when a provider hits its limit.</p>
 
   <div class="layout">
-  <aside class="panel history" aria-label="Run history">
+  <aside class="panel history" aria-label="Token usage and run history">
+    <section class="usage" id="usage" hidden aria-label="Token usage by model">
+      <div class="head">
+        <h2>Token usage</h2>
+        <span class="seg" role="group" aria-label="Period">
+          <button type="button" id="uToday" class="on" aria-pressed="true">Today</button>
+          <button type="button" id="uAll" aria-pressed="false">All time</button>
+        </span>
+      </div>
+      <div id="usageBody"></div>
+    </section>
     <div class="head">
       <h2>History</h2>
       <button type="button" class="linkbtn" id="clearAll" hidden>Clear all</button>
     </div>
-    <p class="alltime" id="allTime" hidden></p>
     <p class="empty" id="historyEmpty">No runs yet. Every prompt you send, with its log and files, will be saved here.</p>
     <ul class="runs" id="runs"></ul>
   </aside>
@@ -214,6 +237,61 @@ export const UI_HTML = /* html */ `<!doctype html>
   const short = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n || 0)));
   const PROVIDER_LABEL = { groq: "Groq", google: "Gemini", nvidia: "NVIDIA NIM", openai: "OpenAI", baton: "Baton" };
 
+  /** Table of per-model usage. "compact" drops the in/out columns (sidebar). */
+  function usageTable(byModel, total, compact) {
+    const head = compact ? ["Model", "Calls", "Tokens"] : ["Model", "Calls", "In", "Out", "Total"];
+    const cells = (m) => compact
+      ? [fmt(m.calls), short(m.totalTokens)]
+      : [fmt(m.calls), fmt(m.promptTokens), fmt(m.completionTokens), fmt(m.totalTokens)];
+    const row = (m) => {
+      const tr = el("tr", {},
+        el("td", {}, m.model, el("span", { className: "prov", textContent: PROVIDER_LABEL[m.provider] || m.provider })),
+        ...cells(m).map((c) => el("td", { textContent: c })));
+      tr.title = fmt(m.promptTokens) + " in · " + fmt(m.completionTokens) + " out" + (m.estimated ? " (some estimated)" : "");
+      return tr;
+    };
+    return el("table", { className: "utable" },
+      el("thead", {}, el("tr", {}, ...head.map((h) => el("th", { textContent: h })))),
+      el("tbody", {}, ...byModel.map(row)),
+      ...(byModel.length > 1 && total ? [el("tfoot", {}, el("tr", {}, el("td", { textContent: "Total" }), ...cells(total).map((c) => el("td", { textContent: c }))))] : []));
+  }
+
+  let usagePeriod = store.get("baton.usagePeriod") === "allTime" ? "allTime" : "today";
+  let usageData = null;
+
+  function renderUsage() {
+    if (!usageData) return;
+    const hasAny = usageData.allTime.runs > 0;
+    $("usage").hidden = !hasAny;
+    if (!hasAny) return;
+    $("uToday").classList.toggle("on", usagePeriod === "today");
+    $("uAll").classList.toggle("on", usagePeriod === "allTime");
+    $("uToday").setAttribute("aria-pressed", String(usagePeriod === "today"));
+    $("uAll").setAttribute("aria-pressed", String(usagePeriod === "allTime"));
+    const d = usageData[usagePeriod];
+    const body = $("usageBody");
+    if (!d.byModel.length) {
+      body.replaceChildren(el("p", { className: "note", textContent: usagePeriod === "today" ? "No tokens used today yet." : "No token usage recorded yet." }));
+      return;
+    }
+    const since = usagePeriod === "allTime" && d.since ? " since " + new Date(d.since).toLocaleDateString() : "";
+    body.replaceChildren(
+      usageTable(d.byModel, d.total, true),
+      el("p", { className: "note", textContent: fmt(d.total.totalTokens) + " tokens · " + d.runs + " run" + (d.runs === 1 ? "" : "s") + since }));
+  }
+
+  async function loadUsage() {
+    try {
+      const res = await fetch("/api/usage");
+      if (res.ok) usageData = await res.json();
+    } catch {}
+    renderUsage();
+  }
+
+  for (const [id, period] of [["uToday", "today"], ["uAll", "allTime"]]) {
+    $(id).addEventListener("click", () => { usagePeriod = period; store.set("baton.usagePeriod", period); renderUsage(); });
+  }
+
   const STATUS_TEXT = { success: "success", partial: "partial", failed: "failed", error: "error", gated: "answered locally" };
 
   // ---------- history ----------
@@ -225,9 +303,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       const res = await fetch("/api/history");
       if (res.ok) runs = (await res.json()).runs || [];
     } catch {}
-    const total = runs.reduce((sum, r) => sum + ((r.usage && r.usage.total.totalTokens) || 0), 0);
-    $("allTime").hidden = runs.length === 0;
-    $("allTime").textContent = fmt(total) + " tokens used across " + runs.length + " run" + (runs.length === 1 ? "" : "s");
+    loadUsage();
     $("historyEmpty").hidden = runs.length > 0;
     $("clearAll").hidden = runs.length === 0;
     $("runs").replaceChildren(...runs.map((r) => {
@@ -290,10 +366,10 @@ export const UI_HTML = /* html */ `<!doctype html>
       tokBox.replaceChildren(el("span", {}, "Tokens: ", el("strong", { textContent: "0" })));
     } else if (u && u.total) {
       tokBox.hidden = false;
-      const by = Object.entries(u.byProvider || {}).map(([p, t]) => (PROVIDER_LABEL[p] || p) + " " + fmt(t.totalTokens)).join(" · ");
       tokBox.replaceChildren(
         el("span", {}, "Tokens: ", el("strong", { textContent: fmt(u.total.totalTokens) }), " "),
-        el("span", { className: "by", textContent: "(" + fmt(u.total.promptTokens) + " in, " + fmt(u.total.completionTokens) + " out" + (u.total.estimated ? ", some estimated" : "") + ")" + (by ? " · " + by : "") }),
+        el("span", { className: "by", textContent: "(" + fmt(u.total.promptTokens) + " in, " + fmt(u.total.completionTokens) + " out" + (u.total.estimated ? ", some estimated" : "") + ")" }),
+        ...(u.byModel && u.byModel.length ? [usageTable(u.byModel, u.total, false)] : []),
       );
     } else {
       tokBox.hidden = true;

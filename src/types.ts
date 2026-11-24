@@ -22,10 +22,22 @@ export interface TokenUsage {
   estimated?: boolean;
 }
 
-/** Token totals for one run: overall and per provider. */
+/** Aggregated usage also counts how many billed calls produced it. */
+export interface UsageTotals extends TokenUsage {
+  calls: number;
+}
+
+export interface ModelUsage extends UsageTotals {
+  provider: string;
+  model: string;
+}
+
+/** Token totals for one run (or many): overall, per provider, and per model. */
 export interface RunUsage {
-  total: TokenUsage;
-  byProvider: Record<string, TokenUsage>;
+  total: UsageTotals;
+  byProvider: Record<string, UsageTotals>;
+  /** Sorted by total tokens, largest first. */
+  byModel: ModelUsage[];
 }
 
 export interface ExecutionLog {

@@ -92,11 +92,15 @@ test("run totals: per log entry, per provider, overall, and saved to history", a
   ]);
   assert.equal(out.executionLogs.find((l: any) => l.event === "failover").tokens, undefined, "failed calls cost nothing");
   assert.deepEqual(out.usage, {
-    total: { promptTokens: 900, completionTokens: 230, totalTokens: 1130 },
+    total: { promptTokens: 900, completionTokens: 230, totalTokens: 1130, calls: 3 },
     byProvider: {
-      google: { promptTokens: 600, completionTokens: 130, totalTokens: 730 },
-      groq: { promptTokens: 300, completionTokens: 100, totalTokens: 400 },
+      google: { promptTokens: 600, completionTokens: 130, totalTokens: 730, calls: 2 },
+      groq: { promptTokens: 300, completionTokens: 100, totalTokens: 400, calls: 1 },
     },
+    byModel: [
+      { provider: "google", model: "gemini-3.8-flash", promptTokens: 600, completionTokens: 130, totalTokens: 730, calls: 2 },
+      { provider: "groq", model: "llama-3.3-70b-versatile", promptTokens: 300, completionTokens: 100, totalTokens: 400, calls: 1 },
+    ],
   });
   const summary = (await app.inject({ method: "GET", url: "/api/history" })).json().runs.find((r: any) => r.id === out.historyId);
   assert.equal(summary.usage.total.totalTokens, 1130);

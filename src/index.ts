@@ -3,6 +3,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
 import { createArtifactZip } from "./services/bundler.js";
+import { mergeUsage } from "./services/logging.js";
 import { FileHistoryStore, HISTORY_ID_RE, type HistoryStore } from "./services/history.js";
 import { MissingKeysError, orchestrate, type OrchestrationErrorInfo } from "./services/orchestrator.js";
 import { PlanningError } from "./services/planner.js";
@@ -68,6 +69,19 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   app.get<{ Querystring: { limit?: string } }>("/api/history", async (req) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
     return { runs: await history.list(limit) };
+  });
+
+  // Token usage across saved runs, per provider and per model. "Today" uses the server's local date.
+  app.get("/api/usage", async () => {
+    const runs = await history.list(Number.MAX_SAFE_INTEGER);
+    const todayKey = new Date().toDateString();
+    const isToday = (iso: string) => new Date(iso).toDateString() === todayKey;
+    const pick = (rs: typeof runs) => mergeUsage(rs.flatMap((r) => (r.usage ? [r.usage] : [])));
+    const todays = runs.filter((r) => isToday(r.createdAt));
+    return {
+      today: { runs: todays.length, ...pick(todays) },
+      allTime: { runs: runs.length, since: runs.at(-1)?.createdAt, ...pick(runs) },
+    };
   });
 
   app.get<{ Params: { id: string } }>("/api/history/:id", async (req, reply) => {

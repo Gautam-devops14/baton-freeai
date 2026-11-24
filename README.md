@@ -20,8 +20,9 @@ Open http://localhost:3000, paste any of your Groq, Gemini, NVIDIA NIM or OpenAI
 Every provider call records the tokens it used, as reported by the provider (`usage` in the response). If a provider doesn't report usage, Baton estimates about 4 characters per token and marks it "estimated". The UI shows:
 
 * tokens per relay-log step
-* per run: total, input vs. output, and a breakdown per provider
-* per history entry, plus a running total across all saved runs in the sidebar
+* per run: total, input vs. output, and a table **per model** (calls, in, out, total)
+* per history entry
+* a **Token usage** panel in the sidebar, per model, for **Today** and **All time**. Free-tier limits are daily or per minute, so "Today" shows how close you are. Runs saved before per-model tracking are included, rebuilt from the tokens in their logs.
 
 Failed calls (429, 503…) aren't counted, because providers don't bill them. Tokens spent on a reply Baton couldn't use (an unusable plan) are counted. The API returns `usage` in the orchestrate response, and each log entry carries `tokens`.
 
@@ -32,7 +33,7 @@ Every prompt you send is saved, along with its result, relay log and generated f
 * Stored as one JSON file per run in `data/runs/` (`BATON_DATA_DIR`, git-ignored). The oldest runs are dropped after `BATON_HISTORY_MAX` (default 500).
 * **API keys are never stored.** Only the names of the providers used are recorded.
 * Anyone who can open the page can see the history. Keep the server on `localhost` or a network you trust.
-* API: `GET /api/history`, `GET /api/history/:id`, `DELETE /api/history/:id`, `DELETE /api/history`.
+* API: `GET /api/history`, `GET /api/history/:id`, `DELETE /api/history/:id`, `DELETE /api/history`, and `GET /api/usage` (token totals per provider and per model, for today and all time).
 
 ## API
 

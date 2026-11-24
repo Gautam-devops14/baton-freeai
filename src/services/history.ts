@@ -5,6 +5,7 @@
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExecutionLog, OrchestrateResponse, RunUsage, TaskType } from "../types.js";
+import { sumUsage } from "./logging.js";
 
 export type RunStatus = OrchestrateResponse["status"] | "gated" | "error";
 
@@ -43,8 +44,18 @@ export interface HistoryStore {
 
 export const HISTORY_ID_RE = /^(ws|run)_[A-Za-z0-9_]+$/;
 
-export function summarize(r: HistoryRecord): HistorySummary {
-  const { executionLogs, artifacts, ...rest } = r;
+/**
+ * Records saved before per-model usage existed still have per-call tokens in
+ * their log, so recompute usage from the log when `byModel` is missing.
+ */
+export function withUsage(r: HistoryRecord): HistoryRecord {
+  if (r.usage?.byModel && r.usage.total?.calls !== undefined) return r;
+  if (!r.executionLogs?.some((l) => l.tokens)) return r;
+  return { ...r, usage: sumUsage(r.executionLogs) };
+}
+
+export function summarize(record: HistoryRecord): HistorySummary {
+  const { executionLogs, artifacts, ...rest } = withUsage(record);
   return { ...rest, artifactCount: Object.keys(artifacts).length, logCount: executionLogs.length };
 }
 
@@ -115,7 +126,7 @@ export class FileHistoryStore implements HistoryStore {
     const index = await this.load();
     if (!index.has(id)) return undefined;
     try {
-      return JSON.parse(await readFile(this.file(id), "utf8")) as HistoryRecord;
+      return withUsage(JSON.parse(await readFile(this.file(id), "utf8")) as HistoryRecord);
     } catch {
       return undefined;
     }
