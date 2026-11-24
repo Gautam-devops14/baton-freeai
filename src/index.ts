@@ -1,6 +1,6 @@
 // Fastify server: route registration and process entrypoint (spec §4).
 
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { pathToFileURL } from "node:url";
 import { createArtifactZip } from "./services/bundler.js";
 import { mergeUsage } from "./services/logging.js";
@@ -16,6 +16,7 @@ import { OPENAI_BASE_URL, OPENAI_MODELS } from "./providers/openai.js";
 import { OPENROUTER_BASE_URL, OPENROUTER_MODELS } from "./providers/openrouter.js";
 import { WORKSPACE_TTL_SECONDS } from "./services/storage.js";
 import { testKeys } from "./services/keytest.js";
+import { allExportFiles, chatExportFiles } from "./services/export.js";
 
 const STARTED_AT = new Date().toISOString();
 import { FileHistoryStore, HISTORY_ID_RE, type HistoryStore } from "./services/history.js";
@@ -129,7 +130,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   );
 
   // ---- Debug: server configuration and runtime state (never keys or prompts) ----
-  app.get("/api/debug", async () => {
+  const debugInfo = async () => {
     const runs = await history.list(Number.MAX_SAFE_INTEGER);
     return {
       server: {
@@ -161,7 +162,24 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
       memory: snapshotMemory(),
       recentCalls: recentCalls(100),
     };
+  };
+  app.get("/api/debug", debugInfo);
+
+  // ---- Export: transcript + complete data + latest files, as a zip (never keys) ----
+  const sendZip = (reply: FastifyReply, name: string, files: Record<string, string>) =>
+    reply
+      .header("Content-Type", "application/zip")
+      .header("Content-Disposition", `attachment; filename="${name}"`)
+      .send(createArtifactZip(files));
+  const stamp = () => new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+
+  app.get<{ Params: { chatId: string } }>("/api/export/chat/:chatId", async (req, reply) => {
+    const files = HISTORY_ID_RE.test(req.params.chatId) ? await chatExportFiles(history, req.params.chatId) : undefined;
+    if (!files) return reply.code(404).send({ status: "error", error: "not_found", message: "No such chat in history." });
+    return sendZip(reply, `baton-chat-${stamp()}.zip`, files);
   });
+
+  app.get("/api/export/all", async (_req, reply) => sendZip(reply, `baton-all-chats-${stamp()}.zip`, await allExportFiles(history, await debugInfo())));
 
   app.delete("/api/debug/memory", async (_req, reply) => {
     forgetProviderMemory();

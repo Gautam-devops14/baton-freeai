@@ -341,8 +341,9 @@ async function requestOnce(
       ...opts,
       onStreamProgress: opts.onTrace ? (chars) => opts.onTrace!({ phase: "progress", at: new Date().toISOString(), ...base, chars }) : undefined,
     });
-    finish({ status: 200, outcome: "ok", tokens: result.usage });
-    return result;
+    // Keep exactly what the model said (before cleanup), so a run can be reviewed later.
+    finish({ status: 200, outcome: "ok", tokens: result.usage, reply: clip(result.raw ?? result.content) });
+    return { content: result.content, usage: result.usage };
   } catch (err) {
     const pe = err instanceof ProviderError ? err : undefined;
     if (pe) pe.model ??= model;
@@ -402,7 +403,7 @@ async function requestUntraced(
   messages: ChatMessage[],
   opts: ChatOptions,
   allowStreamOptions = true,
-): Promise<{ content: string; usage: TokenUsage }> {
+): Promise<{ content: string; usage: TokenUsage; raw?: string }> {
   const url = `${target.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const body: Record<string, unknown> = { model, messages, stream: true };
   if (allowStreamOptions && target.streamUsage !== false) body.stream_options = { include_usage: true };
@@ -518,5 +519,9 @@ function finishContent(target: ProviderTarget, status: number, messages: ChatMes
   if (content.trim() === "") throw new ProviderError(`${target.provider} returned empty completion`, "bad_response", status);
   // Reasoning models (e.g. some NIM-hosted ones) prepend <think>…</think>; it's not part of the artifact.
   const cleaned = content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, "");
-  return { content: cleaned || content, usage: readUsage(usageSource, messages, content) };
+  return { content: cleaned || content, usage: readUsage(usageSource, messages, content), raw: content };
 }
+
+/** Longest raw reply kept per call for the run record / export. */
+const maxReplyChars = () => Number(process.env.BATON_TRACE_REPLY_CHARS ?? 60_000);
+const clip = (s: string) => (s.length > maxReplyChars() ? `${s.slice(0, maxReplyChars())}\n[... ${s.length - maxReplyChars()} more characters not stored ...]` : s);

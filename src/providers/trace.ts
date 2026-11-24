@@ -9,7 +9,8 @@ const recent: CallTrace[] = [];
 /** Keep finished calls in a ring buffer (newest last) for GET /api/debug. */
 export function rememberCall(t: CallTrace): void {
   if (t.phase !== "end") return;
-  recent.push(t);
+  const { reply: _reply, ...light } = t; // keep the server-wide buffer small
+  recent.push(light);
   if (recent.length > MAX_RECENT) recent.splice(0, recent.length - MAX_RECENT);
 }
 

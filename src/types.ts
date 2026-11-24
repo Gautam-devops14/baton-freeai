@@ -59,6 +59,8 @@ export interface CallTrace {
   latencyMs?: number;
   tokens?: TokenUsage;
   detail?: string;
+  /** The model's raw reply (successful calls; stored on the run, not streamed or listed in /api/debug). */
+  reply?: string;
 }
 
 export interface ExecutionLog {

@@ -229,6 +229,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       </details>
       <button type="button" class="side-btn" id="openSettings"><span>Settings &amp; API keys</span><span class="sub" id="keyStatus"></span></button>
       <button type="button" class="side-btn" id="openDebugSide"><span>Debug panel</span><span class="sub" id="debugState">off</span></button>
+      <a class="side-btn" id="exportAll" href="/api/export/all" title="Every chat: transcripts, full data, files, usage and server info (no API keys)" style="text-decoration:none;color:inherit"><span>Export all chats</span><span class="sub">.zip</span></a>
     </div>
   </aside>
   <div class="scrim" id="scrim"></div>
@@ -237,6 +238,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     <header class="topbar">
       <button type="button" class="icon-btn menu-btn" id="menuBtn" aria-label="Open chats">Menu</button>
       <div class="title" id="chatTitle">New chat</div>
+      <a class="icon-btn" id="exportChat" hidden title="Transcript + full data + files, as a zip (no API keys)">Export chat</a>
       <a class="icon-btn" id="downloadLatest" hidden>Download project</a>
       <button type="button" class="icon-btn" id="debugBtn" aria-pressed="false">Debug</button>
     </header>
@@ -553,6 +555,7 @@ export const UI_HTML = /* html */ `<!doctype html>
   function showWelcome() {
     $("chatTitle").textContent = "New chat";
     $("downloadLatest").hidden = true;
+    $("exportChat").hidden = true;
     $("threadInner").replaceChildren(el("div", { className: "welcome" },
       el("h1", { textContent: "What should Baton build?" }),
       el("p", { textContent: "Describe a project. Baton plans it, builds each file on free AI providers, and switches provider automatically when one is busy or out of quota. Reply in the same chat to change the project." }),
@@ -588,6 +591,8 @@ export const UI_HTML = /* html */ `<!doctype html>
     $("threadInner").replaceChildren(...recs.flatMap((rec) => [userMsg(rec.userPrompt), botMsg(rec)]));
     const latestFiles = [...recs].reverse().find((r) => Object.keys(r.artifacts || {}).length && r.status !== "error");
     $("downloadLatest").hidden = !latestFiles;
+    $("exportChat").hidden = false;
+    $("exportChat").href = "/api/export/chat/" + encodeURIComponent(chat.id);
     if (latestFiles) $("downloadLatest").href = "/api/download/" + latestFiles.id;
     selectedRunId = recs.length ? recs[recs.length - 1].id : null;
     updateComposer();

@@ -28,6 +28,16 @@ Keys are only stored in your browser if you tick "Remember keys".
 
 API for the debug features: `GET /api/progress/:clientRunId` (Server-Sent Events; send the same `clientRunId` with the orchestrate request), `GET /api/debug`, `DELETE /api/debug/memory`. Runs also carry `chatId` and `calls`.
 
+## Export (for review or sharing)
+
+* **Export chat** (top bar, in an open chat) downloads a zip with:
+  * `transcript.md`: a readable story of the chat. For each message: your prompt; the plan (decisions, files, which model planned it); then for every step, what the model was given, every attempt with its result (who failed and why, who succeeded, time, tokens), the **exact prompt sent** and the model's **raw reply**; the files changed or added; the relay log.
+  * `chat.json`: the complete run records.
+  * `project/`: the latest version of the files.
+* **Export all chats** (sidebar) does the same for every chat, plus `index.md`, `usage.json` (tokens per model) and `server.json` (provider order, models, settings, what Baton remembers, recent calls).
+
+Raw replies are stored for successful calls (up to `BATON_TRACE_REPLY_CHARS`, default 60,000 characters per call). They're stored with the run but not streamed live or listed in `/api/debug`. API keys are never stored, so they can't appear in an export. API: `GET /api/export/chat/:chatId`, `GET /api/export/all`.
+
 ## Follow-ups
 
 Click **Continue this project** on any run with files, then type what to change (e.g. "add a delete button and a logo"). Baton:

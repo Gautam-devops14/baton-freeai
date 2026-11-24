@@ -28,7 +28,8 @@ export function traceFor(ws: BatonWorkspace, step: number) {
     traceMeta: { runId: ws.workspaceId, step },
     onTrace: (call: CallTrace) => {
       if (call.phase === "end") (ws.calls ??= []).push(call);
-      ws.emit?.({ type: "call", call });
+      const { reply: _reply, ...light } = call; // the full reply is stored, not streamed
+      ws.emit?.({ type: "call", call: light });
     },
   };
 }
