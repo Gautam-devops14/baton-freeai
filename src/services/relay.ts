@@ -4,8 +4,10 @@
 
 import { chatCompletion, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
-import { log, logModelSwaps } from "./logging.js";
+import { splitBusy } from "../providers/memory.js";
+import { log, logBusySkips, logModelSwaps } from "./logging.js";
 import { extractArtifactBody } from "./sanitize.js";
+import { contextFile, originLabel, recordContext } from "./context.js";
 
 const DEFAULT_COOLDOWN_MS = 60_000;
 
@@ -28,20 +30,32 @@ export function buildTaskMessages(ws: BatonWorkspace, task: BatonTask): ChatMess
     .map(([k, v]) => `- ${k}: ${v}`)
     .join("\n");
 
-  const manifest = ws.tasks
-    .map((t) => `- [${t.status === "completed" ? "x" : t.id === task.id ? ">" : " "}] ${t.targetArtifact} — ${t.title}`)
-    .join("\n");
+  const planned = new Set(ws.tasks.map((t) => t.targetArtifact));
+  const untouched = Object.keys(ws.artifacts).filter((p) => !planned.has(p));
+  const manifest = [
+    ...ws.tasks.map((t) => `- [${t.status === "completed" ? "x" : t.id === task.id ? ">" : " "}] ${t.targetArtifact} — ${t.title}`),
+    ...untouched.map((p) => `- [=] ${p} — existing file, unchanged`),
+  ].join("\n");
 
-  const completed = ws.tasks
-    .filter((t) => t.status === "completed" && ws.artifacts[t.targetArtifact] !== undefined)
-    .map((t) => `=== ${t.targetArtifact} ===\n${ws.artifacts[t.targetArtifact]}`)
+  // Every file in the shared workspace except the one being written, labelled with who wrote it.
+  const shared = sharedFiles(ws, task)
+    .map((p) => {
+      const by = originLabel(ws, p);
+      return `=== ${p} ===${by ? ` (written by ${by})` : ""}\n${ws.artifacts[p]}`;
+    })
     .join("\n");
+  const current = ws.artifacts[task.targetArtifact];
+  const isFollowUp = Boolean(ws.conversation?.length);
 
   const sections = [
-    `## Project goal\n${ws.userPrompt}`,
+    isFollowUp
+      ? `## Earlier requests (oldest first)\n${ws.conversation!.map((p, i) => `${i + 1}. ${p}`).join("\n")}\n\n## Current request\n${ws.userPrompt}`
+      : `## Project goal\n${ws.userPrompt}`,
     decisions && `## Architectural decisions (binding)\n${decisions}`,
-    `## Artifact manifest ([x] done, [>] current)\n${manifest}`,
-    completed && `## Completed artifacts (stay consistent with these)\n${completed}`,
+    `## Artifact manifest ([x] done, [>] current, [=] existing)\n${manifest}`,
+    shared && `## Project files so far (stay consistent with these)\n${shared}`,
+    current !== undefined &&
+      `## Current contents of \`${task.targetArtifact}\` (rewrite the WHOLE file, applying the change)\n${current}`,
     `## Your assignment\nProduce the full contents of \`${task.targetArtifact}\`: ${task.title}`,
   ].filter(Boolean);
 
@@ -57,6 +71,11 @@ export function buildTaskMessages(ws: BatonWorkspace, task: BatonTask): ChatMess
   ];
 }
 
+/** Paths whose full text goes into a task's prompt: everything in the workspace except the target. */
+function sharedFiles(ws: BatonWorkspace, task: BatonTask): string[] {
+  return Object.keys(ws.artifacts).filter((p) => p !== task.targetArtifact);
+}
+
 export interface RelayOptions {
   /** Ordered waterfall: index 0 is the sprint tier, later entries are fallbacks. */
   targets: ProviderTarget[];
@@ -70,16 +89,34 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
   const cooldowns = opts.cooldowns ?? new Map<string, number>();
   const now = opts.now ?? Date.now;
   const keyOf = (t: ProviderTarget) => `${t.provider}:${t.model}`;
+  const busyLogged = new Set<string>(); // log each busy-skip once per run, not once per task
 
   for (const task of ws.tasks) {
     if (task.status === "completed") continue;
     task.status = "in_progress";
     const messages = buildTaskMessages(ws, task);
+    recordContext(
+      ws,
+      {
+        step: task.id,
+        kind: "task",
+        target: task.targetArtifact,
+        targetExisted: ws.artifacts[task.targetArtifact] !== undefined,
+        manifest: [...new Set([...ws.tasks.map((t) => t.targetArtifact), ...Object.keys(ws.artifacts)])],
+        files: sharedFiles(ws, task).map((p) => contextFile(ws, p)),
+      },
+      messages,
+    );
 
     // Respect cooldowns, but never leave a task with zero candidates: if every
     // tier is cooling down, try them all anyway in waterfall order.
     const ready = opts.targets.filter((t) => (cooldowns.get(keyOf(t)) ?? 0) <= now());
-    const candidates = ready.length > 0 ? ready : opts.targets;
+    // Also skip providers that were busy (503) moments ago, in this run or an earlier one.
+    const { ready: notBusy, skipped } = splitBusy(ready.length > 0 ? ready : opts.targets);
+    const newlySkipped = skipped.filter((s) => !busyLogged.has(keyOf(s.target)));
+    newlySkipped.forEach((s) => busyLogged.add(keyOf(s.target)));
+    logBusySkips(ws, task.id, newlySkipped);
+    const candidates = notBusy;
 
     for (const [i, target] of candidates.entries()) {
       try {
@@ -91,6 +128,12 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         task.status = "completed";
         task.assignedProvider = target.provider;
         task.assignedModel = result.model;
+        (ws.artifactOrigins ??= {})[task.targetArtifact] = {
+          provider: target.provider,
+          model: result.model,
+          runId: ws.workspaceId,
+          step: task.id,
+        };
         log(ws, task.id, "execute", { ...target, model: result.model }, `Generated ${task.targetArtifact} successfully`, result.usage);
         break;
       } catch (err) {

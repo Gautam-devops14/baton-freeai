@@ -72,7 +72,7 @@ test("full relay: Groq sprint, 429 failover to Gemini with full context, zip dow
   assert.equal(groqCalls, 2);
 
   // Context preservation: Gemini sees Groq's earlier output via the workspace.
-  assert.match(geminiPrompts[0], /=== package\.json ===\n\{"name": "auth"\}/);
+  assert.match(geminiPrompts[0], /=== package\.json === \(written by groq\/openai\/gpt-oss-120b\)\n\{"name": "auth"\}/);
   assert.match(geminiPrompts[0], /framework: express/);
 
   const zip = await app.inject({ method: "GET", url: out.downloadUrl });
@@ -181,7 +181,7 @@ test("all Gemini models retired: planning falls over to Groq only after both wer
     "failover:google:gemini-3.8-flash",
     "failover:google:gemini-3.5-flash-lite",
     "failover:google:gemini-3.5-flash-lite",
-    "plan:groq:llama-3.3-70b-versatile",
+    "plan:groq:openai/gpt-oss-120b",
   ]);
   assert.match(out.executionLogs[2].message, /HTTP 404 model unavailable: no longer available; passing planning to groq/);
 });
@@ -287,4 +287,12 @@ test("OpenAI key alone is enough to run", async () => {
   })).json();
   assert.equal(out.status, "success");
   assert.equal(out.executionLogs[0].provider, "openai");
+});
+
+test("the web UI's inline script is valid JavaScript (guards against template-literal escaping slips)", async () => {
+  const { Script } = await import("node:vm");
+  const { UI_HTML } = await import("../src/ui.js");
+  const js = /<script>([\s\S]*)<\/script>/.exec(UI_HTML)![1];
+  assert.doesNotThrow(() => new Script(js));
+  assert.ok(js.includes('.join("\\n")'), "newline escapes survive into the page as \\n, not raw line breaks");
 });

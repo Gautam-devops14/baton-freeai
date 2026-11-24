@@ -51,10 +51,58 @@ export interface ExecutionLog {
   tokens?: TokenUsage;
 }
 
+/** Who wrote a file, so later steps (and the UI) can see where shared context came from. */
+export interface ArtifactOrigin {
+  provider: string;
+  model: string;
+  /** Run that wrote it (an earlier run, for files carried into a follow-up). */
+  runId: string;
+  step: number;
+}
+
+/** One file whose full text was included in a step's prompt. */
+export interface ContextFile {
+  path: string;
+  /** "previous": carried over from the run being continued; "this-run": written earlier in this run. */
+  source: "previous" | "this-run";
+  /** "provider/model" that wrote it, when known. */
+  by?: string;
+  tokens: number;
+}
+
+/** Exactly what one planning or build step was given: Baton's shared context, made visible. */
+export interface StepContext {
+  step: number;
+  kind: "plan" | "task";
+  /** File this step writes (task steps). */
+  target?: string;
+  /** The target already existed (a follow-up rewriting a file). */
+  targetExisted?: boolean;
+  goal: string;
+  /** Earlier requests in a follow-up chain, oldest first. */
+  conversation: string[];
+  decisions: Record<string, string | number | boolean>;
+  /** Every file path the step was told about. */
+  manifest: string[];
+  /** Files whose full text was included. */
+  files: ContextFile[];
+  /** Estimated size of the whole prompt. */
+  promptTokens: number;
+  /** The exact messages sent (possibly truncated for storage). */
+  messages: ChatMessage[];
+}
+
 export interface BatonWorkspace {
   workspaceId: string;
   userPrompt: string;
   taskType: TaskType;
+  /** Follow-ups: the run this continues, and the earlier requests in the chain (oldest first). */
+  parentId?: string;
+  conversation?: string[];
+  /** Who wrote each artifact. */
+  artifactOrigins?: Record<string, ArtifactOrigin>;
+  /** What each step was given (filled by planner and relay). */
+  contexts?: StepContext[];
   metadata: {
     primaryLanguage?: string;
     framework?: string;
@@ -79,6 +127,8 @@ export interface OrchestrateRequest {
   userPrompt: string;
   taskType?: TaskType;
   keys: ProviderKeys;
+  /** History id of a previous run: change that project instead of starting a new one. */
+  continueFrom?: string;
 }
 
 export interface OrchestrateResponse {
@@ -86,6 +136,12 @@ export interface OrchestrateResponse {
   workspaceId: string;
   /** Id of this run in the history store (same as workspaceId), if history is enabled. */
   historyId?: string;
+  /** Set when this run continued an earlier one. */
+  parentId?: string;
+  /** Files changed vs. added by this run (follow-ups); for new projects everything is "added". */
+  changes?: { modified: string[]; added: string[] };
+  contexts?: StepContext[];
+  artifactOrigins?: Record<string, ArtifactOrigin>;
   taskType: TaskType;
   summary: {
     totalTasks: number;

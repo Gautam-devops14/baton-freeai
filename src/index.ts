@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { createArtifactZip } from "./services/bundler.js";
 import { mergeUsage } from "./services/logging.js";
 import { FileHistoryStore, HISTORY_ID_RE, type HistoryStore } from "./services/history.js";
-import { MissingKeysError, orchestrate, type OrchestrationErrorInfo } from "./services/orchestrator.js";
+import { FollowUpError, MissingKeysError, orchestrate, type OrchestrationErrorInfo } from "./services/orchestrator.js";
 import { PlanningError } from "./services/planner.js";
 import { InMemoryWorkspaceStore, type WorkspaceStore } from "./services/storage.js";
 import type { OrchestrateRequest } from "./types.js";
@@ -18,6 +18,7 @@ const orchestrateSchema = {
     additionalProperties: false,
     properties: {
       userPrompt: { type: "string", minLength: 1, maxLength: 20_000 },
+      continueFrom: { type: "string", pattern: "^(ws|run)_[A-Za-z0-9_]+$" },
       taskType: { type: "string", enum: ["code", "document", "analysis"] },
       keys: {
         type: "object",
@@ -56,6 +57,9 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
       const extra = { historyId: info.historyId, executionLogs: info.executionLogs ?? [] };
       if (err instanceof MissingKeysError) {
         return reply.code(400).send({ status: "error", error: "missing_keys", message: err.message, ...extra });
+      }
+      if (err instanceof FollowUpError) {
+        return reply.code(404).send({ status: "error", error: "follow_up_not_found", message: err.message, ...extra });
       }
       if (err instanceof PlanningError) {
         return reply.code(502).send({ status: "error", error: "planning_failed", message: err.message, ...extra });

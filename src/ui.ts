@@ -104,6 +104,29 @@ export const UI_HTML = /* html */ `<!doctype html>
   .usage .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
   .usage .utable { font-size: 12px; }
   .usage .utable th, .usage .utable td { padding: 4px 3px; }
+  .followup { border: 1px solid var(--accent); background: var(--bg); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 14px; }
+  .followup .fu-help { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .followup .linkbtn { margin-top: 6px; }
+  .chain { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+  .chain ol { margin: 4px 0 0; padding-left: 20px; }
+  .chain .changes { margin-top: 6px; color: var(--text); }
+  .actions .linkbtn.primary { font-weight: 600; }
+  .ctx-intro { color: var(--muted); font-size: 14px; margin: -4px 0 14px; }
+  ol.ctx { list-style: none; margin: 0; padding: 0 0 0 18px; border-left: 2px solid var(--line); }
+  ol.ctx > li { position: relative; margin: 0 0 16px; }
+  ol.ctx > li::before { content: ""; position: absolute; left: -25px; top: 5px; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); }
+  .ctx h3 { font-size: 15px; margin: 0 0 4px; overflow-wrap: anywhere; }
+  .ctx h3 .meta { font-weight: 400; }
+  .ctx .sent { font-size: 13px; margin: 2px 0 6px; overflow-wrap: anywhere; }
+  .ctx .sent .ok { color: var(--ok); }
+  .ctx .sent .bad { color: var(--warn); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+  .chip { font-size: 12px; border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 2px 9px; overflow-wrap: anywhere; }
+  .chip.file { border-color: var(--accent); }
+  .chip.prev { border-style: dashed; }
+  .chip .from { color: var(--muted); }
+  .ctx details summary { font-family: inherit; font-size: 13px; color: var(--accent); }
+  .ctx details pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -134,7 +157,12 @@ export const UI_HTML = /* html */ `<!doctype html>
 
   <div class="content">
   <form class="panel" id="form">
-    <label for="prompt">What should Baton build?</label>
+    <div class="followup" id="followup" hidden>
+      <div><strong>Follow-up</strong> to: <span id="fuPrompt"></span> <span class="meta" id="fuFiles"></span></div>
+      <div class="fu-help">Your prompt will change this project. Every model gets its earlier requests and current files as context.</div>
+      <button type="button" class="linkbtn" id="fuCancel">Start a new project instead</button>
+    </div>
+    <label for="prompt" id="promptLabel">What should Baton build?</label>
     <textarea id="prompt" required placeholder="Create an Express.js authentication service with JWT and bcrypt"></textarea>
 
     <div class="row">
@@ -175,14 +203,22 @@ export const UI_HTML = /* html */ `<!doctype html>
   <section class="panel" id="results" hidden>
     <h2>Result</h2>
     <p class="meta" id="runMeta"></p>
+    <div class="chain" id="runChain" hidden></div>
     <div class="prompt-view" id="runPrompt"></div>
     <div class="summary" id="summary"></div>
     <div class="tokens" id="runTokens" hidden></div>
     <div class="errbox" id="runError" hidden></div>
     <div class="actions">
+      <button type="button" class="linkbtn primary" id="continue">Continue this project</button>
       <button type="button" class="linkbtn" id="reuse">Use this prompt again</button>
       <button type="button" class="linkbtn danger" id="deleteRun">Delete from history</button>
     </div>
+  </section>
+
+  <section class="panel" id="ctxPanel" hidden>
+    <h2>How context was shared</h2>
+    <p class="ctx-intro">Baton never relies on a model's own chat memory. Each step gets the same shared workspace: the goal, the plan's decisions, the file list and the full text of every file written so far. That's why any model can pick up where another stopped, and why the same context is simply re-sent when a provider fails.</p>
+    <ol class="ctx" id="ctx"></ol>
   </section>
 
   <section class="panel" id="logPanel" hidden>
@@ -310,7 +346,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       const files = r.artifactCount ? " · " + r.artifactCount + " file" + (r.artifactCount === 1 ? "" : "s") : "";
       const toks = r.usage && r.usage.total.totalTokens ? " · " + short(r.usage.total.totalTokens) + " tok" : "";
       const btn = el("button", { type: "button", className: "run" + (current && current.id === r.id ? " active" : "") },
-        el("span", { className: "p", textContent: r.userPrompt }),
+        el("span", { className: "p", textContent: (r.parentId ? "↳ " : "") + r.userPrompt }),
         el("span", { className: "m" },
           el("span", { className: "dot " + r.status }),
           el("span", { textContent: (STATUS_TEXT[r.status] || r.status) + " · " + ago(r.createdAt) + files + toks })));
@@ -348,6 +384,9 @@ export const UI_HTML = /* html */ `<!doctype html>
     $("runMeta").textContent = [when, run.taskType].filter(Boolean).join(" · ") + secs + via;
     $("runPrompt").textContent = run.userPrompt || "";
     $("deleteRun").hidden = !run.id;
+    renderChain(run);
+    $("continue").hidden = !(run.id && Object.keys(run.artifacts || {}).length && run.status !== "error" && run.status !== "gated");
+    renderContexts(run);
 
     const summary = $("summary");
     summary.replaceChildren(el("span", { className: "pill " + run.status, textContent: STATUS_TEXT[run.status] || run.status }));
@@ -393,6 +432,99 @@ export const UI_HTML = /* html */ `<!doctype html>
     $("artifactPanel").hidden = entries.length === 0;
     $("artifacts").replaceChildren(...entries.map(([path, content], i) =>
       el("details", { open: i === 0 }, el("summary", { textContent: path }), el("pre", { textContent: content }))));
+  }
+
+  // ---------- follow-ups ----------
+  let followUp = null;
+  try { followUp = JSON.parse(store.get("baton.followUp") || "null"); } catch {}
+
+  function setFollowUp(fu) {
+    followUp = fu;
+    store.set("baton.followUp", fu ? JSON.stringify(fu) : null);
+    $("followup").hidden = !fu;
+    $("promptLabel").textContent = fu ? "What should Baton change?" : "What should Baton build?";
+    $("prompt").placeholder = fu ? "e.g. add a delete button to each row and a logo in the header" : "Create an Express.js authentication service with JWT and bcrypt";
+    if (fu) {
+      $("fuPrompt").textContent = "\u201c" + (fu.prompt.length > 90 ? fu.prompt.slice(0, 87) + "..." : fu.prompt) + "\u201d";
+      $("fuFiles").textContent = "(" + fu.files + " file" + (fu.files === 1 ? "" : "s") + ")";
+    }
+  }
+  setFollowUp(followUp);
+
+  const followUpFrom = (run) => ({ id: run.id, prompt: run.userPrompt || "", files: Object.keys(run.artifacts || {}).length, taskType: run.taskType });
+
+  $("continue").addEventListener("click", () => {
+    if (!current) return;
+    setFollowUp(followUpFrom(current));
+    if (current.taskType) $("taskType").value = current.taskType;
+    $("prompt").value = "";
+    $("prompt").focus();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+  $("fuCancel").addEventListener("click", () => setFollowUp(null));
+
+  function renderChain(run) {
+    const box = $("runChain");
+    const earlier = run.conversation || [];
+    const ch = run.changes;
+    if (!run.parentId && !earlier.length) { box.hidden = true; return; }
+    box.hidden = false;
+    box.replaceChildren(
+      el("div", { textContent: "Follow-up. Earlier requests in this project:" }),
+      el("ol", {}, ...earlier.map((p) => el("li", { textContent: p }))),
+      ...(ch && (ch.modified.length || ch.added.length)
+        ? [el("div", { className: "changes", textContent:
+            [ch.modified.length ? "Changed: " + ch.modified.join(", ") : "", ch.added.length ? "Added: " + ch.added.join(", ") : ""]
+              .filter(Boolean).join(" · ") + " · project now has " + Object.keys(run.artifacts || {}).length + " files" })]
+        : []));
+  }
+
+  function renderContexts(run) {
+    const list = run.contexts || [];
+    $("ctxPanel").hidden = list.length === 0;
+    if (!list.length) return;
+    const origins = run.artifactOrigins || {};
+    const logs = run.executionLogs || [];
+    $("ctx").replaceChildren(...list.map((c) => {
+      const title = c.kind === "plan"
+        ? el("h3", { textContent: "Plan" })
+        : el("h3", {}, "Step " + c.step + " \u00b7 " + c.target + " ",
+            el("span", { className: "meta", textContent: c.targetExisted ? "(rewrite of an existing file)" : "(new file)" }));
+
+      // Who received this exact context, in order: failures first, then the model that answered.
+      const attempts = logs.filter((l) => l.step === c.step && l.event !== "complete" && !/^skipped:/.test(l.message));
+      const sent = el("div", { className: "sent" }, "Sent to: ");
+      attempts.forEach((l, i) => {
+        const ok = l.event === "execute" || l.event === "plan";
+        if (i) sent.append(" \u2192 ");
+        const why = ok ? " \u2713" : " \u2717 " + l.message.split(";")[0].replace(/^(HTTP \\d+ [^:]+).*$/, "$1");
+        sent.append(el("span", { className: ok ? "ok" : "bad", textContent: l.provider + "/" + l.model + why }));
+      });
+      if (!attempts.length) sent.append("(no attempts recorded)");
+
+      const chips = el("div", { className: "chips" });
+      const chip = (text, tip, cls) => { const n = el("span", { className: "chip" + (cls ? " " + cls : ""), textContent: text }); if (tip) n.title = tip; chips.append(n); };
+      chip("Goal", c.goal);
+      if (c.conversation && c.conversation.length) chip("Earlier requests (" + c.conversation.length + ")", c.conversation.map((p, i) => (i + 1) + ". " + p).join("\\n"));
+      const dec = Object.entries(c.decisions || {});
+      if (dec.length) chip("Decisions: " + dec.map(([k, v]) => k + "=" + v).join(", "));
+      if (c.manifest && c.manifest.length) chip("File list (" + c.manifest.length + ")", c.manifest.join("\\n"));
+      for (const f of c.files || []) {
+        const o = origins[f.path];
+        const from = f.source === "previous"
+          ? "earlier run" + (f.by ? ", " + f.by : "")
+          : (o ? "Step " + o.step + ", " : "") + (f.by || "this run");
+        const n = el("span", { className: "chip file" + (f.source === "previous" ? " prev" : "") },
+          f.path + " ", el("span", { className: "from", textContent: "\u00b7 ~" + short(f.tokens) + " tok \u00b7 from " + from }));
+        chips.append(n);
+      }
+      if (c.targetExisted) chip("Current " + c.target + " to rewrite", "", "file prev");
+
+      const prompt = el("details", {},
+        el("summary", { textContent: "View exact prompt (~" + fmt(c.promptTokens) + " tokens)" }),
+        el("pre", { textContent: (c.messages || []).map((m) => "[" + m.role + "]\\n" + m.content).join("\\n\\n") }));
+      return el("li", {}, title, sent, el("div", { className: "meta", textContent: "Received:" }), chips, prompt);
+    }));
   }
 
   $("reuse").addEventListener("click", () => {
@@ -442,6 +574,7 @@ export const UI_HTML = /* html */ `<!doctype html>
         body: JSON.stringify({
           userPrompt,
           taskType,
+          continueFrom: followUp ? followUp.id : undefined,
           keys: {
             groqApiKey: $("groq").value.trim() || undefined,
             geminiApiKey: $("gemini").value.trim() || undefined,
@@ -453,9 +586,18 @@ export const UI_HTML = /* html */ `<!doctype html>
       let data = {};
       try { data = await res.json(); } catch {}
       setStatus(data.error === "missing_keys" ? "Add at least one API key (Groq, Gemini, NVIDIA NIM or OpenAI) to run a project." : "", data.error === "missing_keys");
+      if (data.error === "follow_up_not_found") {
+        setFollowUp(null);
+        setStatus(data.message + " Follow-up mode switched off.", true);
+      }
       await loadHistory();
       if (data.historyId) {
         await openRun(data.historyId);
+        // Keep the conversation going: the next prompt continues from the newest version of the project.
+        if (followUp && current && current.id === data.historyId && Object.keys(current.artifacts || {}).length && current.status !== "error") {
+          setFollowUp(followUpFrom(current));
+          $("prompt").value = "";
+        }
       } else {
         // History unavailable: show the response directly.
         render({ ...data, userPrompt, taskType, status: res.ok ? data.status : "error",

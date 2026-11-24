@@ -15,6 +15,37 @@ npm run build && npm start
 
 Open http://localhost:3000, paste any of your Groq, Gemini, NVIDIA NIM or OpenAI keys, describe a project and click **Run**. You'll see the relay log, each generated file, and a .zip download link. Keys are only stored in your browser if you tick "Remember keys".
 
+## Follow-ups
+
+Click **Continue this project** on any run with files, then type what to change (e.g. "add a delete button and a logo"). Baton:
+
+* gives the planner your earlier requests and the current files, and plans only the files that must change or be added
+* gives each build step the current version of the file it rewrites, plus every other project file
+* returns the **whole project**: unchanged files are carried over, and the result lists what was changed and what was added
+* stays in follow-up mode (even after a refresh), so the next prompt continues from the newest version. Use **Start a new project instead** to leave.
+
+## Text files only
+
+Language models can only write text, so binary files are never planned. Images such as `logo.png` become `logo.svg`, which the model draws properly. Other binary files (PDF, fonts, zip…) are dropped from the plan.
+
+## How context is shared
+
+Each run shows a **How context was shared** panel. For every step it lists:
+
+* who it was sent to, in order (e.g. `nvidia ✗ 429 → groq ✓`); a fallback provider gets exactly the same context
+* what it received: the goal, earlier requests, decisions, the file list, and each file included in full, with who wrote it (`from Step 1, groq/openai/gpt-oss-120b` or `from earlier run`)
+* the prompt size and the **exact prompt** sent
+
+This is the core of Baton: context lives in the shared workspace, not in any model's chat memory.
+
+## Memory between runs
+
+While the server runs, Baton remembers per provider account (keyed by a hash of the API key, never the key itself):
+
+* **retired models** (404/410/"decommissioned"): skipped for 24h (`BATON_DEAD_MODEL_TTL_MS`)
+* **discovered replacements**: reused for 24h, so discovery doesn't repeat every run
+* **busy providers** (every model answered 503): skipped for 5 minutes (`BATON_BUSY_SKIP_MS`) in later steps and runs, unless no other provider is left. The log says `skipped: every google model was busy…`
+
 ## Token counter
 
 Every provider call records the tokens it used, as reported by the provider (`usage` in the response). If a provider doesn't report usage, Baton estimates about 4 characters per token and marks it "estimated". The UI shows:
@@ -49,7 +80,8 @@ curl -s localhost:3000/api/orchestrate -H 'content-type: application/json' -d '{
 
 * `taskType`: `code` (default), `document`, or `analysis`.
 * `keys`: at least one is required (BYOK). With only one key, Baton runs single-provider and loses failover.
-  * Order for building files: Groq → Gemini → NVIDIA NIM → OpenAI. Order for planning: Gemini → Groq → NVIDIA NIM → OpenAI.
+  * Default order for both planning and building: **NVIDIA NIM → Groq → Gemini → OpenAI**. Change it with `BATON_PROVIDER_ORDER=groq,nvidia,google,openai`, or for one stage only with `BATON_PLANNER_ORDER` / `BATON_RELAY_ORDER`.
+  * `continueFrom` (optional): a history id. The run then **changes that project** instead of starting a new one (see Follow-ups).
   * Default models: see `.env.example`. Each provider has an ordered model list (`GROQ_*_MODELS`, `GEMINI_MODELS`, `NVIDIA_*_MODELS`, `OPENAI_MODELS`).
   * NVIDIA NIM uses `integrate.api.nvidia.com`, with keys from build.nvidia.com.
   * OpenAI has no free API tier, so its key needs billing. It is always tried last, so it only costs money when the free providers fail. Default models: `gpt-5-mini`, then `gpt-4.1-mini` (override with `OPENAI_MODELS`).

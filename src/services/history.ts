@@ -4,7 +4,7 @@
 
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExecutionLog, OrchestrateResponse, RunUsage, TaskType } from "../types.js";
+import type { ArtifactOrigin, BatonTask, BatonWorkspace, ExecutionLog, OrchestrateResponse, RunUsage, StepContext, TaskType } from "../types.js";
 import { sumUsage } from "./logging.js";
 
 export type RunStatus = OrchestrateResponse["status"] | "gated" | "error";
@@ -24,11 +24,21 @@ export interface HistoryRecord {
   summary?: OrchestrateResponse["summary"];
   /** Tokens spent by this run (absent for gated prompts and old records). */
   usage?: RunUsage;
+  /** Follow-ups: the run this continued, and the earlier requests in the chain (oldest first). */
+  parentId?: string;
+  conversation?: string[];
+  /** Files this run changed vs. added. */
+  changes?: { modified: string[]; added: string[] };
+  /** The plan (decisions + tasks), so a follow-up can keep the project's decisions. */
+  plan?: { metadata: BatonWorkspace["metadata"]; tasks: BatonTask[] };
+  /** What each step was given, and who wrote each file. */
+  contexts?: StepContext[];
+  artifactOrigins?: Record<string, ArtifactOrigin>;
   executionLogs: ExecutionLog[];
   artifacts: Record<string, string>;
 }
 
-export type HistorySummary = Omit<HistoryRecord, "executionLogs" | "artifacts"> & {
+export type HistorySummary = Omit<HistoryRecord, "executionLogs" | "artifacts" | "contexts" | "plan" | "artifactOrigins"> & {
   artifactCount: number;
   logCount: number;
 };
@@ -55,7 +65,7 @@ export function withUsage(r: HistoryRecord): HistoryRecord {
 }
 
 export function summarize(record: HistoryRecord): HistorySummary {
-  const { executionLogs, artifacts, ...rest } = withUsage(record);
+  const { executionLogs, artifacts, contexts: _c, plan: _p, artifactOrigins: _o, ...rest } = withUsage(record);
   return { ...rest, artifactCount: Object.keys(artifacts).length, logCount: executionLogs.length };
 }
 

@@ -10,11 +10,12 @@ const list = (env: string | undefined, fallback: string[]) => {
 
 /**
  * Ordered preference. The spec's qwen-2.5-coder-32b has been decommissioned by
- * Groq. llama-3.3-70b-versatile does the real work; llama-3.1-8b-instant is a
- * small, high-limit backup. If both are retired, Baton discovers a replacement
- * from Groq's live model list. Override with GROQ_CODE_MODELS / GROQ_GENERAL_MODELS.
+ * Groq, and real runs showed the llama models answering 404 for some accounts,
+ * so gpt-oss-120b goes first with the llamas as backups. If all are gone,
+ * Baton discovers a replacement from Groq's live model list.
+ * Override with GROQ_CODE_MODELS / GROQ_GENERAL_MODELS.
  */
-export const DEFAULT_GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
+export const DEFAULT_GROQ_MODELS = ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
 
 export const GROQ_MODELS = {
   code: list(process.env.GROQ_CODE_MODELS ?? process.env.GROQ_CODE_MODEL, DEFAULT_GROQ_MODELS),

@@ -5,7 +5,9 @@
 import { chatCompletion, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
 import { safeArtifactPath } from "./paths.js";
-import { log, logModelSwaps } from "./logging.js";
+import { splitBusy } from "../providers/memory.js";
+import { contextFile, recordContext } from "./context.js";
+import { log, logBusySkips, logModelSwaps } from "./logging.js";
 
 /** We ask for 2-4 tasks (spec), but accept a 1-task plan rather than failing a small request. */
 export const MIN_TASKS = 2;
@@ -14,6 +16,16 @@ export const MIN_ACCEPTED_TASKS = 1;
 
 const PATH_KEYS = ["targetArtifact", "target_artifact", "artifact", "file", "filename", "fileName", "filePath", "file_path", "path", "target"];
 const TITLE_KEYS = ["title", "name", "task", "description", "summary", "goal"];
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|tiff?|avif|heic)$/i;
+const OTHER_BINARY_EXT = /\.(pdf|zip|gz|tgz|rar|7z|tar|exe|dll|so|dylib|bin|woff2?|ttf|otf|eot|mp3|mp4|wav|ogg|mov|avi|webm|psd|ai|sketch|docx?|xlsx?|pptx?|jar|class|wasm|sqlite|db)$/i;
+
+/** Binary files can't come out of a text model: images become .svg, anything else is dropped. */
+export function textOnlyPath(path: string): string | null {
+  if (IMAGE_EXT.test(path)) return path.replace(IMAGE_EXT, ".svg");
+  if (OTHER_BINARY_EXT.test(path)) return null;
+  return path;
+}
 
 const firstString = (o: Record<string, unknown>, keys: string[]) =>
   keys.map((k) => o[k]).find((v): v is string => typeof v === "string" && v.trim() !== "");
@@ -33,13 +45,55 @@ export function buildPlannerMessages(ws: BatonWorkspace): ChatMessage[] {
         "You are the Task Architect for Baton, a multi-model build relay.",
         `Decompose the user's objective into ${MIN_TASKS} to ${MAX_TASKS} atomic artifacts. Each task produces exactly ONE artifact.`,
         TASK_TYPE_GUIDANCE[ws.taskType],
+        "Every artifact must be a plain-text file (source code, HTML, CSS, JSON, Markdown, CSV, SVG...). " +
+          "Never plan binary files such as .png, .jpg, .gif, .ico, .pdf, .zip or fonts: a text model cannot produce them. " +
+          "Draw logos, icons and illustrations as SVG (a .svg file or inline <svg> in HTML).",
         "Order tasks so that dependencies come before the artifacts that consume them.",
         "Respond with ONLY a JSON object, no prose, matching:",
         '{"decisions": {"<key>": "<string value>", ...}, "tasks": [{"title": "<what to build>", "targetArtifact": "<relative path>"}]}',
       ].join("\n"),
     },
-    { role: "user", content: `Task type: ${ws.taskType}\nObjective: ${ws.userPrompt}` },
+    { role: "user", content: plannerUserMessage(ws) },
   ];
+}
+
+/** Planner input: the request, plus (for follow-ups) the earlier requests and the existing files. */
+export const MAX_PLANNER_FILE_CHARS = 40_000;
+
+function existingFilesForPlanner(ws: BatonWorkspace): { included: string[]; listed: string[] } {
+  let budget = MAX_PLANNER_FILE_CHARS;
+  const included: string[] = [];
+  const listed: string[] = [];
+  for (const [path, content] of Object.entries(ws.artifacts)) {
+    if (content.length <= budget) {
+      included.push(path);
+      budget -= content.length;
+    } else listed.push(path);
+  }
+  return { included, listed };
+}
+
+function plannerUserMessage(ws: BatonWorkspace): string {
+  const files = Object.keys(ws.artifacts);
+  if (!ws.conversation?.length && files.length === 0) {
+    return `Task type: ${ws.taskType}\nObjective: ${ws.userPrompt}`;
+  }
+  const { included, listed } = existingFilesForPlanner(ws);
+  return [
+    `Task type: ${ws.taskType}`,
+    "This is a FOLLOW-UP to an existing project. Change the existing files to satisfy the new request.",
+    `## Earlier requests (oldest first)\n${(ws.conversation ?? []).map((p, i) => `${i + 1}. ${p}`).join("\n")}`,
+    `## New request\n${ws.userPrompt}`,
+    `## Existing project files\n${files.map((f) => `- ${f}`).join("\n")}`,
+    included.length ? `## Current contents\n${included.map((f) => `=== ${f} ===\n${ws.artifacts[f]}`).join("\n")}` : "",
+    listed.length ? `(Contents of ${listed.join(", ")} omitted for length.)` : "",
+    "## Rules for follow-ups\n" +
+      "- Plan ONLY the files that must change or be added for the new request (1 to 4).\n" +
+      "- To change an existing file, use its exact existing path; it will be rewritten in full.\n" +
+      "- Keep the project's existing language, framework and structure.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /** Pull the first JSON object (or array) out of a reply, tolerating fences or stray prose. */
@@ -82,7 +136,8 @@ export function parsePlan(text: string): ParsedPlan {
     const t = raw as Record<string, unknown>;
     const rawPath = firstString(t, PATH_KEYS);
     if (!rawPath) continue;
-    const path = safeArtifactPath(rawPath);
+    const safe = safeArtifactPath(rawPath);
+    const path = safe ? textOnlyPath(safe) : null;
     if (!path || seen.has(path)) continue;
     seen.add(path);
     const title = firstString(t, TITLE_KEYS)?.trim() ?? `Write ${path}`;
@@ -100,8 +155,16 @@ export function parsePlan(text: string): ParsedPlan {
  * architect; any further targets are a safety net so a single rate limit
  * doesn't kill the whole request before it starts.
  */
-export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[]): Promise<void> {
+export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarget[]): Promise<void> {
   const messages = buildPlannerMessages(ws);
+  const { included, listed } = existingFilesForPlanner(ws);
+  recordContext(
+    ws,
+    { step: 0, kind: "plan", manifest: [...included, ...listed], files: included.map((p) => contextFile(ws, p)) },
+    messages,
+  );
+  const { ready: targets, skipped } = splitBusy(allTargets);
+  logBusySkips(ws, 0, skipped);
   let lastError: unknown;
   const attempts: PlanAttempt[] = [];
 

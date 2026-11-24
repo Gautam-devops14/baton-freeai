@@ -14,11 +14,20 @@ import type {
   TaskType,
 } from "../types.js";
 import { gate } from "./gate.js";
+import { originsFromLogs } from "./context.js";
 import { log, sumUsage } from "./logging.js";
 import { planWorkspace } from "./planner.js";
 import { runRelay } from "./relay.js";
 import type { HistoryRecord, HistoryStore } from "./history.js";
 import type { WorkspaceStore } from "./storage.js";
+
+/** continueFrom names a run that doesn't exist or has no files to build on. */
+export class FollowUpError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FollowUpError";
+  }
+}
 
 export class MissingKeysError extends Error {
   constructor() {
@@ -45,12 +54,28 @@ export function buildTargets(
   const groq = keys.groqApiKey ? groqTarget(keys.groqApiKey, taskType) : undefined;
   const nvidia = keys.nvidiaApiKey ? nvidiaTarget(keys.nvidiaApiKey, taskType) : undefined;
   const openai = keys.openaiApiKey ? openaiTarget(keys.openaiApiKey) : undefined;
-  const present = (t: (ProviderTarget | undefined)[]) => t.filter((x): x is ProviderTarget => Boolean(x));
-  return {
-    // Free tiers first; OpenAI is paid, so it is always the last resort.
-    planner: present([gemini, groq, nvidia, openai]), // Gemini is the architect
-    relay: present([groq, gemini, nvidia, openai]), // Groq is the sprint tier
-  };
+  const byName: Record<string, ProviderTarget | undefined> = { nvidia, groq, google: gemini, openai };
+  const ordered = (order: string[]) =>
+    order.map((name) => byName[name]).filter((x): x is ProviderTarget => Boolean(x));
+  return { planner: ordered(providerOrder("planner")), relay: ordered(providerOrder("relay")) };
+}
+
+const KNOWN_PROVIDERS = ["nvidia", "groq", "google", "openai"];
+/** Default waterfall: NVIDIA, then Groq, then Gemini (often overloaded), then paid OpenAI last. */
+export const DEFAULT_PROVIDER_ORDER = ["nvidia", "groq", "google", "openai"];
+
+/**
+ * Provider order from BATON_PROVIDER_ORDER (both stages) or BATON_PLANNER_ORDER /
+ * BATON_RELAY_ORDER, e.g. "groq,nvidia,google,openai". "gemini" is accepted for
+ * "google". Providers left out are appended in default order so a key is never ignored.
+ */
+export function providerOrder(stage: "planner" | "relay"): string[] {
+  const raw = (stage === "planner" ? process.env.BATON_PLANNER_ORDER : process.env.BATON_RELAY_ORDER) ?? process.env.BATON_PROVIDER_ORDER;
+  const named = (raw ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase().replace(/^gemini$/, "google"))
+    .filter((s) => KNOWN_PROVIDERS.includes(s));
+  return [...new Set([...named, ...DEFAULT_PROVIDER_ORDER])];
 }
 
 /** Errors raised by orchestrate carry the history record id and any relay log so far. */
@@ -115,15 +140,47 @@ export async function orchestrate(
     throw err;
   }
 
+  // Follow-up: start from the earlier run's files, decisions and request chain.
+  let parent: HistoryRecord | undefined;
+  if (req.continueFrom) {
+    parent = history ? await history.get(req.continueFrom) : undefined;
+    const problem = !parent
+      ? "The run you are continuing was not found in history (it may have been deleted)."
+      : Object.keys(parent.artifacts).length === 0
+        ? "The run you are continuing has no files to build on. Start a new project instead."
+        : undefined;
+    if (problem) {
+      const err = new FollowUpError(problem);
+      Object.assign(err, { historyId: await record({ id: runId(), status: "error", message: problem, parentId: req.continueFrom }) });
+      throw err;
+    }
+  }
+
   const ws: BatonWorkspace = {
     workspaceId: newWorkspaceId(),
     userPrompt: req.userPrompt.trim(),
-    taskType,
-    metadata: {},
+    taskType: parent && !req.taskType ? parent.taskType : taskType,
+    metadata: { ...(parent?.plan?.metadata ?? {}) },
     tasks: [],
-    artifacts: {},
+    artifacts: { ...(parent?.artifacts ?? {}) },
     executionLogs: [],
+    ...(parent
+      ? {
+          parentId: parent.id,
+          conversation: [...(parent.conversation ?? []), parent.userPrompt],
+          artifactOrigins: { ...(parent.artifactOrigins ?? originsFromLogs(parent.id, parent.executionLogs)) },
+        }
+      : {}),
   };
+  const before = new Set(Object.keys(ws.artifacts));
+  /** Fields every record of this run shares. */
+  const runFields = () => ({
+    parentId: ws.parentId,
+    conversation: ws.conversation,
+    contexts: ws.contexts,
+    artifactOrigins: ws.artifactOrigins,
+    plan: { metadata: ws.metadata, tasks: ws.tasks },
+  });
 
   try {
     const targets = buildTargets(keys, taskType);
@@ -153,11 +210,17 @@ export async function orchestrate(
       artifactsGenerated: completed.map((t) => t.targetArtifact),
     };
     const usage = sumUsage(ws.executionLogs);
+    const changes = {
+      modified: completed.map((t) => t.targetArtifact).filter((p) => before.has(p)),
+      added: completed.map((t) => t.targetArtifact).filter((p) => !before.has(p)),
+    };
     const historyId = await record({
       id: ws.workspaceId,
       status,
       summary,
       usage,
+      changes,
+      ...runFields(),
       executionLogs: ws.executionLogs,
       artifacts: ws.artifacts,
     });
@@ -171,6 +234,10 @@ export async function orchestrate(
       artifacts: ws.artifacts,
       executionLogs: ws.executionLogs,
       usage,
+      parentId: ws.parentId,
+      changes,
+      contexts: ws.contexts,
+      artifactOrigins: ws.artifactOrigins,
       downloadUrl: `/api/download/${ws.workspaceId}`,
     };
   } catch (err) {
@@ -180,8 +247,10 @@ export async function orchestrate(
       status: "error",
       message,
       usage: sumUsage(ws.executionLogs), // a failed run can still have spent tokens (e.g. an unusable plan)
+      ...runFields(),
       executionLogs: ws.executionLogs,
-      artifacts: ws.artifacts,
+      // A follow-up that failed before changing anything shouldn't look like it produced the old files.
+      artifacts: ws.tasks.some((t) => t.status === "completed") ? ws.artifacts : parent ? {} : ws.artifacts,
     });
     if (err && typeof err === "object") {
       Object.assign(err, { historyId, executionLogs: ws.executionLogs } satisfies OrchestrationErrorInfo);

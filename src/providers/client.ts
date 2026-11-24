@@ -3,6 +3,14 @@
 
 import type { ChatMessage, ProviderTarget, TokenUsage } from "../types.js";
 import { listModels, rankModels } from "./discovery.js";
+import {
+  clearProviderBusy,
+  getDiscoveredModel,
+  isModelDead,
+  markModelDead,
+  markProviderBusy,
+  rememberDiscoveredModel,
+} from "./memory.js";
 
 export const DEFAULT_TIMEOUT_MS = Number(process.env.BATON_PROVIDER_TIMEOUT_MS ?? 30_000);
 
@@ -177,7 +185,11 @@ export async function chatCompletion(
   opts: ChatOptions = {},
 ): Promise<ChatResult> {
   const unavailable = (target.unavailableModels ??= new Set<string>());
-  let candidates = [target.model, ...(target.fallbackModels ?? [])].filter(
+  // Models retired in earlier runs are skipped straight away; a replacement
+  // discovered in an earlier run is tried after any configured model still alive.
+  for (const m of [target.model, ...(target.fallbackModels ?? [])]) if (isModelDead(target, m)) unavailable.add(m);
+  const remembered = getDiscoveredModel(target);
+  let candidates = [target.model, ...(target.fallbackModels ?? []), ...(remembered ? [remembered] : [])].filter(
     (m, i, all) => all.indexOf(m) === i && !unavailable.has(m),
   );
   const skippedModels: SkippedModel[] = [];
@@ -189,6 +201,7 @@ export async function chatCompletion(
     for (const [i, model] of candidates.entries()) {
       try {
         const { content, usage } = await requestOnce(target, model, messages, opts);
+        clearProviderBusy(target);
         return { content, model, skippedModels, usage };
       } catch (err) {
         if (!(err instanceof ProviderError)) throw err;
@@ -196,8 +209,10 @@ export async function chatCompletion(
           // e.g. the fallback model is rate limited: surface it, but keep the swap history.
           throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels, err.detail);
         }
-        if (err.kind === "model_unavailable") unavailable.add(model);
-        else overloaded.push(model);
+        if (err.kind === "model_unavailable") {
+          unavailable.add(model);
+          markModelDead(target, model);
+        } else overloaded.push(model);
         skippedModels.push({ model, reason: err.reason, next: candidates[i + 1] });
         lastError = err;
       }
@@ -221,13 +236,18 @@ export async function chatCompletion(
       try {
         const { content, usage } = await requestOnce(target, model, messages, opts);
         target.fallbackModels = [...(target.fallbackModels ?? []), model]; // reuse it for the rest of the run
+        rememberDiscoveredModel(target, model); // ...and in later runs
+        clearProviderBusy(target);
         return { content, model, skippedModels, usage };
       } catch (err) {
         if (!(err instanceof ProviderError)) throw err;
         if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
           throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels, err.detail);
         }
-        if (err.kind === "model_unavailable") unavailable.add(model);
+        if (err.kind === "model_unavailable") {
+          unavailable.add(model);
+          markModelDead(target, model);
+        }
         skippedModels.push({ model, reason: err.reason, next: found[i + 1], nextDiscovered: Boolean(found[i + 1]) });
         lastError = err;
       }
@@ -236,6 +256,7 @@ export async function chatCompletion(
 
   const tried = [target.model, ...(target.fallbackModels ?? [])].join(", ");
   const kind = lastError?.kind === "overloaded" ? "overloaded" : "model_unavailable";
+  if (kind === "overloaded") markProviderBusy(target); // skip it for a few minutes in later steps and runs
   throw new ProviderError(
     kind === "overloaded"
       ? `${target.provider} models are overloaded (tried: ${tried}): ${lastError?.message}`

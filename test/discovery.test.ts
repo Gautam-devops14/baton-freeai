@@ -28,12 +28,12 @@ test("rankModels: drops non-chat models, follows hints, newest version first", (
 
 test("Groq 400 'decommissioned' is recognised as a retired model and the next model is used", async () => {
   installFetch(({ model }) =>
-    model === "llama-3.3-70b-versatile"
-      ? new Response(JSON.stringify({ error: { message: "The model `llama-3.3-70b-versatile` has been decommissioned and is no longer supported.", type: "invalid_request_error", code: "model_decommissioned" } }), { status: 400 })
+    model === "openai/gpt-oss-120b"
+      ? new Response(JSON.stringify({ error: { message: "The model `openai/gpt-oss-120b` has been decommissioned and is no longer supported.", type: "invalid_request_error", code: "model_decommissioned" } }), { status: 400 })
       : reply("ok"));
   const r = await chatCompletion(buildTargets({ groqApiKey: "g" }, "code").relay[0], []);
-  assert.equal(r.model, "llama-3.1-8b-instant");
-  assert.match(r.skippedModels[0].reason, /^HTTP 400 model unavailable: The model `llama-3\.3-70b-versatile` has been decommissioned/);
+  assert.equal(r.model, "llama-3.3-70b-versatile");
+  assert.match(r.skippedModels[0].reason, /^HTTP 400 model unavailable: The model `openai\/gpt-oss-120b` has been decommissioned/);
 });
 
 test("all configured models retired: discovers a replacement from the live model list, once per run", async () => {
@@ -84,16 +84,16 @@ test("the user's run: Groq decommissioned, Gemini busy, NVIDIA 410 -> recovers v
   assert.equal(out.artifacts["index.html"], "<!doctype html><title>Todo</title>\n");
   const msgs = out.executionLogs.map((l: any) => `${l.provider}/${l.model}: ${l.message}`);
   assert.ok(msgs.some((m: string) => m.startsWith("google/gemini-3.5-flash-lite: Project decomposed into 1 milestone")), msgs.join("\n"));
-  assert.ok(msgs.some((m: string) => /^groq\/llama-3\.3-70b-versatile: HTTP 400 model unavailable: The model .* decommissioned/.test(m)));
+  assert.ok(msgs.some((m: string) => /^groq\/openai\/gpt-oss-120b: HTTP 400 model unavailable: The model .* decommissioned/.test(m)));
   assert.ok(msgs.some((m: string) => m.includes("(picked from nvidia's current model list)")));
   assert.ok(msgs.some((m: string) => m.startsWith("nvidia/qwen/qwen9-coder-instruct: Generated index.html successfully")));
   assert.ok(!calls.some((c) => c.url.includes("openai.com")), "paid OpenAI never reached");
 });
 
-test("Groq defaults: llama-3.3-70b-versatile, then llama-3.1-8b-instant, for every task type", () => {
+test("Groq defaults: gpt-oss-120b, then the llama models, for every task type", () => {
   for (const type of ["code", "document", "analysis"] as const) {
     const t = buildTargets({ groqApiKey: "g" }, type).relay[0];
-    assert.equal(t.model, "llama-3.3-70b-versatile");
-    assert.deepEqual(t.fallbackModels, ["llama-3.1-8b-instant"]);
+    assert.equal(t.model, "openai/gpt-oss-120b");
+    assert.deepEqual(t.fallbackModels, ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]);
   }
 });
