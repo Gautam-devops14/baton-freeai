@@ -5,7 +5,7 @@
 import { chatCompletion, ProviderError } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
 import { busyUntilFor, splitBusy } from "../providers/memory.js";
-import { log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
+import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 import { extractArtifactBody } from "./sanitize.js";
 import { contextFile, originLabel, recordContext } from "./context.js";
 
@@ -32,7 +32,7 @@ const ROLE_BY_TYPE: Record<BatonWorkspace["taskType"], string> = {
   analysis: "a rigorous data analyst. Write complete, reproducible analysis artifacts",
 };
 
-export function buildTaskMessages(ws: BatonWorkspace, task: BatonTask): ChatMessage[] {
+export function buildTaskPrompt(ws: BatonWorkspace, task: BatonTask): { messages: ChatMessage[]; sections: TaskPromptSections } {
   const decisions = Object.entries(ws.metadata)
     .filter(([, v]) => v !== undefined && v !== "")
     .map(([k, v]) => `- ${k}: ${v}`)
@@ -55,28 +55,49 @@ export function buildTaskMessages(ws: BatonWorkspace, task: BatonTask): ChatMess
   const current = ws.artifacts[task.targetArtifact];
   const isFollowUp = Boolean(ws.conversation?.length);
 
-  const sections = [
-    isFollowUp
-      ? `## Earlier requests (oldest first)\n${ws.conversation!.map((p, i) => `${i + 1}. ${p}`).join("\n")}\n\n## Current request\n${ws.userPrompt}`
-      : `## Project goal\n${ws.userPrompt}`,
-    decisions && `## Architectural decisions (binding)\n${decisions}`,
-    `## Artifact manifest ([x] done, [>] current, [=] existing)\n${manifest}`,
-    shared && `## Project files so far (stay consistent with these)\n${shared}`,
-    current !== undefined &&
-      `## Current contents of \`${task.targetArtifact}\` (rewrite the WHOLE file, applying the change)\n${current}`,
-    `## Your assignment\nProduce the full contents of \`${task.targetArtifact}\`: ${task.title}`,
-  ].filter(Boolean);
-
-  return [
-    {
-      role: "system",
-      content:
-        `You are ${ROLE_BY_TYPE[ws.taskType]}. You are one stage in a relay: earlier artifacts were written by other ` +
-        "models and are authoritative. Output ONLY the complete contents of the requested artifact inside a single " +
-        "fenced code block. No explanations before or after it, no placeholders, no ellipses.",
-    },
-    { role: "user", content: sections.join("\n\n") },
+  // Each section is tagged with its purpose so token use can be broken down later.
+  const parts: Array<[keyof TaskPromptSections, string | false]> = [
+    [
+      "request",
+      isFollowUp
+        ? `## Earlier requests (oldest first)\n${ws.conversation!.map((p, i) => `${i + 1}. ${p}`).join("\n")}\n\n## Current request\n${ws.userPrompt}`
+        : `## Project goal\n${ws.userPrompt}`,
+    ],
+    ["context", Boolean(decisions) && `## Architectural decisions (binding)\n${decisions}`],
+    ["context", `## Artifact manifest ([x] done, [>] current, [=] existing)\n${manifest}`],
+    ["context", Boolean(shared) && `## Project files so far (stay consistent with these)\n${shared}`],
+    [
+      "context",
+      current !== undefined &&
+        `## Current contents of \`${task.targetArtifact}\` (rewrite the WHOLE file, applying the change)\n${current}`,
+    ],
+    ["instructions", `## Your assignment\nProduce the full contents of \`${task.targetArtifact}\`: ${task.title}`],
   ];
+  const system =
+    `You are ${ROLE_BY_TYPE[ws.taskType]}. You are one stage in a relay: earlier artifacts were written by other ` +
+    "models and are authoritative. Output ONLY the complete contents of the requested artifact inside a single " +
+    "fenced code block. No explanations before or after it, no placeholders, no ellipses.";
+  const used = parts.filter((p): p is [keyof TaskPromptSections, string] => Boolean(p[1]));
+  const sections: TaskPromptSections = { instructions: system.length, request: 0, context: 0 };
+  for (const [kind, text] of used) sections[kind] += text.length;
+  return {
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: used.map((p) => p[1]).join("\n\n") },
+    ],
+    sections,
+  };
+}
+
+/** Characters of each kind of text in a build prompt (for the token breakdown). */
+export interface TaskPromptSections {
+  instructions: number;
+  request: number;
+  context: number;
+}
+
+export function buildTaskMessages(ws: BatonWorkspace, task: BatonTask): ChatMessage[] {
+  return buildTaskPrompt(ws, task).messages;
 }
 
 /** Paths whose full text goes into a task's prompt: everything in the workspace except the target. */
@@ -102,7 +123,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
   for (const task of ws.tasks) {
     if (task.status === "completed") continue;
     task.status = "in_progress";
-    const messages = buildTaskMessages(ws, task);
+    const { messages, sections } = buildTaskPrompt(ws, task);
     recordContext(
       ws,
       {
@@ -135,6 +156,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         });
         logModelSwaps(ws, task.id, target.provider, result.skippedModels);
         ws.artifacts[task.targetArtifact] = extractArtifactBody(result.content, task.targetArtifact);
+        attachBreakdown(ws, task.id, result.model, buildCallBreakdown(result.usage, sections, ws.artifacts[task.targetArtifact].length, result.content.length));
         task.status = "completed";
         task.assignedProvider = target.provider;
         task.assignedModel = result.model;

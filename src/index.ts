@@ -3,7 +3,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { pathToFileURL } from "node:url";
 import { createArtifactZip } from "./services/bundler.js";
-import { mergeUsage } from "./services/logging.js";
+import { mergeBreakdowns, mergeUsage } from "./services/logging.js";
 import { CLIENT_RUN_ID_RE, subscribeProgress } from "./services/progress.js";
 import { providerOrder } from "./services/orchestrator.js";
 import { DEFAULT_TIMEOUT_MS } from "./providers/client.js";
@@ -191,7 +191,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
     const runs = await history.list(Number.MAX_SAFE_INTEGER);
     const todayKey = new Date().toDateString();
     const isToday = (iso: string) => new Date(iso).toDateString() === todayKey;
-    const pick = (rs: typeof runs) => mergeUsage(rs.flatMap((r) => (r.usage ? [r.usage] : [])));
+    const pick = (rs: typeof runs) => ({
+      ...mergeUsage(rs.flatMap((r) => (r.usage ? [r.usage] : []))),
+      breakdown: mergeBreakdowns(rs.map((r) => r.breakdown)),
+    });
     const todays = runs.filter((r) => isToday(r.createdAt));
     return {
       today: { runs: todays.length, ...pick(todays) },

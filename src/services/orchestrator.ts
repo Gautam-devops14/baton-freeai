@@ -17,7 +17,7 @@ import type {
 import { gate } from "./gate.js";
 import { originsFromLogs } from "./context.js";
 import { CLIENT_RUN_ID_RE, progressEmitter } from "./progress.js";
-import { log, sumUsage } from "./logging.js";
+import { log, sumBreakdown, sumUsage } from "./logging.js";
 import { planWorkspace } from "./planner.js";
 import { runRelay } from "./relay.js";
 import type { HistoryRecord, HistoryStore } from "./history.js";
@@ -220,6 +220,7 @@ export async function orchestrate(
     plan: { metadata: ws.metadata, tasks: ws.tasks },
     calls: ws.calls,
     chatId: ws.chatId,
+    breakdown: sumBreakdown(ws.calls),
   });
 
   try {
@@ -281,6 +282,7 @@ export async function orchestrate(
       artifactOrigins: ws.artifactOrigins,
       chatId: ws.chatId,
       calls: ws.calls,
+      breakdown: sumBreakdown(ws.calls),
       downloadUrl: `/api/download/${ws.workspaceId}`,
     };
   } catch (err) {

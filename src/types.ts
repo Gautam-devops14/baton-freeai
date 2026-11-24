@@ -43,6 +43,30 @@ export interface RunUsage {
   byModel: ModelUsage[];
 }
 
+/**
+ * Where tokens went, by purpose. Input-side categories (instructions, request,
+ * context) split the provider-reported input total by each prompt section's
+ * share of the text, so they're estimates; output and thinking are measured.
+ */
+export interface TokenBreakdown {
+  /** Planning calls: reading the request and deciding the files (input + output). */
+  understanding: number;
+  /** Baton's fixed rules and the assignment text in build prompts. */
+  instructions: number;
+  /** The user's goal and earlier requests in build prompts. */
+  request: number;
+  /** Decisions, file list and the full text of files shared from earlier steps. */
+  context: number;
+  /** The file content the model wrote (what ends up in the project). */
+  code: number;
+  /** Other reply text: explanations, code fences, chatter around the file. */
+  otherText: number;
+  /** Hidden reasoning tokens (reported by the provider, or estimated from reasoning text). */
+  thinking: number;
+  /** Replies Baton couldn't use (e.g. an unusable plan). */
+  wasted: number;
+}
+
 /** One HTTP call to a provider (debug view). "start" is emitted live; "end" is stored. */
 export interface CallTrace {
   /** "start" and "progress" are streamed live; only "end" is stored. */
@@ -64,6 +88,8 @@ export interface CallTrace {
   detail?: string;
   /** The model's raw reply (successful calls; stored on the run, not streamed or listed in /api/debug). */
   reply?: string;
+  /** How this call's tokens split by purpose (successful calls). */
+  breakdown?: TokenBreakdown;
 }
 
 export interface ExecutionLog {
@@ -191,6 +217,8 @@ export interface OrchestrateResponse {
   artifactOrigins?: Record<string, ArtifactOrigin>;
   chatId?: string;
   calls?: CallTrace[];
+  /** Where this run's tokens went, by purpose. */
+  breakdown?: TokenBreakdown;
   taskType: TaskType;
   summary: {
     totalTasks: number;

@@ -100,6 +100,27 @@ While the server runs, Baton remembers per provider account (keyed by a hash of 
   * no working models, including discovered ones: 1 h (`BATON_NO_MODELS_SKIP_MS`)
 * Discovery on NVIDIA only considers chat/instruct models. NVIDIA also lists code-completion models such as `starcoder2`, which its chat endpoint answers with 404. Up to 5 candidates are tried.
 
+## Every model before the next provider
+
+Rate limits, overloads and timeouts are usually per model, so Baton tries **all of a provider's models** before moving to the next provider: first the configured list, then (once per run) models it discovers from the provider's live list. Only account-level problems skip a provider at once, because no other model would help: key rejected, no credit, a daily cap, or the host unreachable. The log shows each model tried (`HTTP 429 rate limit detected; retrying with llama-3.3-70b-versatile`). NVIDIA's defaults come from its current catalogue: `nvidia/nemotron-3-ultra-550b-a55b`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `deepseek-ai/deepseek-v4.1-flash`.
+
+## Where the tokens went
+
+Each run splits its tokens by purpose. It's shown in the debug panel ("This run" → *Where the tokens went*, plus *Tokens by step*), in the sidebar's token usage for today and all time, and in exports.
+
+| Category | Meaning | How measured |
+|---|---|---|
+| Understanding | planning calls: reading the request, choosing files | measured |
+| Instructions | Baton's rules and the assignment in each build prompt | estimated share of input |
+| Your request | the goal and earlier requests | estimated share of input |
+| Context | decisions, file list, files from earlier steps | estimated share of input |
+| Code written | the file content that went into the project | measured share of output |
+| Other reply text | explanations and fences around the file | measured share of output |
+| Thinking | hidden reasoning | reported (`reasoning_tokens`), or estimated from reasoning text |
+| Wasted | replies Baton couldn't use (e.g. a bad plan) | measured |
+
+Providers only report a total for input tokens, so the input split is shared out by how much text each prompt section takes up.
+
 ## Token counter
 
 Every provider call records the tokens it used, as reported by the provider (`usage` in the response). If a provider doesn't report usage, Baton estimates about 4 characters per token and marks it "estimated". The UI shows:

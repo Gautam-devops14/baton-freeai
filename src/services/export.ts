@@ -96,6 +96,24 @@ function runSection(rec: HistoryRecord, n: number): string {
   }
   if (rec.status === "error" && rec.message) out.push("**Error:**", "", quote(rec.message), "");
 
+  // Where the tokens went
+  if (rec.breakdown) {
+    const b = rec.breakdown;
+    const total = Object.values(b).reduce((s, n) => s + n, 0) || 1;
+    const rows: Array<[string, number, string]> = [
+      ["Understanding (planning)", b.understanding, "measured"],
+      ["Instructions", b.instructions, "estimated share of input"],
+      ["Your request", b.request, "estimated share of input"],
+      ["Context (files, decisions)", b.context, "estimated share of input"],
+      ["Code written", b.code, "measured share of output"],
+      ["Other reply text", b.otherText, "measured share of output"],
+      ["Thinking", b.thinking, "reported or estimated"],
+      ["Wasted", b.wasted, "measured"],
+    ];
+    out.push("**Where the tokens went:**", "", "| Category | Tokens | % | How measured |", "|---|---|---|---|",
+      ...rows.map(([n, v, how]) => `| ${n} | ${fmt(v)} | ${((100 * v) / total).toFixed(1)}% | ${how} |`), "");
+  }
+
   // Plan
   const tasks = rec.plan?.tasks ?? [];
   const planLog = rec.executionLogs.find((l) => l.event === "plan");

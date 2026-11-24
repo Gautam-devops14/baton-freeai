@@ -1,5 +1,5 @@
 import type { SkippedModel } from "../providers/client.js";
-import type { BatonWorkspace, CallTrace, ExecutionLog, LogEvent, ModelUsage, ProviderTarget, RunUsage, TokenUsage, UsageTotals } from "../types.js";
+import type { BatonWorkspace, CallTrace, ExecutionLog, LogEvent, ModelUsage, ProviderTarget, RunUsage, TokenBreakdown, TokenUsage, UsageTotals } from "../types.js";
 
 export function log(
   ws: BatonWorkspace,
@@ -32,6 +32,54 @@ export function traceFor(ws: BatonWorkspace, step: number) {
       ws.emit?.({ type: "call", call: light });
     },
   };
+}
+
+export const zeroBreakdown = (): TokenBreakdown => ({
+  understanding: 0, instructions: 0, request: 0, context: 0, code: 0, otherText: 0, thinking: 0, wasted: 0,
+});
+
+/** Attach a breakdown to the most recent successful call for this step and model. */
+export function attachBreakdown(ws: BatonWorkspace, step: number, model: string, breakdown: Partial<TokenBreakdown>): void {
+  const call = [...(ws.calls ?? [])].reverse().find((c) => c.step === step && c.model === model && c.outcome === "ok" && !c.breakdown);
+  if (call) call.breakdown = { ...zeroBreakdown(), ...breakdown };
+}
+
+/** Add up several runs' breakdowns (e.g. today / all time). */
+export function mergeBreakdowns(list: Array<TokenBreakdown | undefined>): TokenBreakdown {
+  const total = zeroBreakdown();
+  for (const b of list) if (b) for (const k of Object.keys(total) as Array<keyof TokenBreakdown>) total[k] += b[k] ?? 0;
+  return total;
+}
+
+/** Sum the per-call breakdowns of a run. */
+export function sumBreakdown(calls: CallTrace[] | undefined): TokenBreakdown | undefined {
+  const withB = (calls ?? []).filter((c) => c.breakdown);
+  if (!withB.length) return undefined;
+  const total = zeroBreakdown();
+  for (const c of withB) for (const k of Object.keys(total) as Array<keyof TokenBreakdown>) total[k] += c.breakdown![k] ?? 0;
+  return total;
+}
+
+/**
+ * Split one build call's tokens by purpose.
+ *  input:  the reported input total, shared out by each prompt section's share of the text
+ *  output: thinking (reported or estimated) + the file's share of the visible reply + the rest
+ */
+export function buildCallBreakdown(
+  usage: TokenUsage,
+  sections: { instructions: number; request: number; context: number },
+  fileChars: number,
+  replyChars: number,
+): Partial<TokenBreakdown> {
+  const totalChars = sections.instructions + sections.request + sections.context || 1;
+  const share = (n: number) => Math.round((usage.promptTokens * n) / totalChars);
+  const instructions = share(sections.instructions);
+  const request = share(sections.request);
+  const context = Math.max(0, usage.promptTokens - instructions - request);
+  const thinking = Math.min(usage.reasoningTokens ?? 0, usage.completionTokens);
+  const visible = Math.max(0, usage.completionTokens - thinking);
+  const code = Math.round(visible * Math.min(1, fileChars / Math.max(1, replyChars)));
+  return { instructions, request, context, code, otherText: visible - code, thinking };
 }
 
 const zero = (): UsageTotals => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 0 });

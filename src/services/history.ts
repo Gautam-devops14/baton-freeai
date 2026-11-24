@@ -4,7 +4,7 @@
 
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ArtifactOrigin, BatonTask, CallTrace, BatonWorkspace, ExecutionLog, OrchestrateResponse, RunUsage, StepContext, TaskType } from "../types.js";
+import type { ArtifactOrigin, BatonTask, CallTrace, TokenBreakdown, BatonWorkspace, ExecutionLog, OrchestrateResponse, RunUsage, StepContext, TaskType } from "../types.js";
 import { sumUsage } from "./logging.js";
 
 export type RunStatus = OrchestrateResponse["status"] | "gated" | "error";
@@ -40,6 +40,8 @@ export interface HistoryRecord {
   chatId?: string;
   /** Every provider call this run made (debug view). */
   calls?: CallTrace[];
+  /** Where this run's tokens went, by purpose. */
+  breakdown?: TokenBreakdown;
   executionLogs: ExecutionLog[];
   artifacts: Record<string, string>;
 }

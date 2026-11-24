@@ -7,7 +7,7 @@ import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../
 import { safeArtifactPath } from "./paths.js";
 import { splitBusy } from "../providers/memory.js";
 import { contextFile, recordContext } from "./context.js";
-import { log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
+import { attachBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./logging.js";
 
 /** We ask for 2-4 tasks (spec), but accept a 1-task plan rather than failing a small request. */
 export const MIN_TASKS = 2;
@@ -180,6 +180,7 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
       });
       logModelSwaps(ws, 0, target.provider, result.skippedModels);
       const plan = parsePlan(result.content);
+      attachBreakdown(ws, 0, result.model, { understanding: result.usage.totalTokens });
       ws.metadata = { ...ws.metadata, ...plan.metadata };
       ws.tasks = plan.tasks;
       ws.emit?.({ type: "plan", tasks: plan.tasks.map((t) => ({ id: t.id, targetArtifact: t.targetArtifact, title: t.title })) });
@@ -188,6 +189,8 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
     } catch (err) {
       lastError = err;
       if (err instanceof ProviderError) logModelSwaps(ws, 0, target.provider, err.skippedModels);
+      // The model answered but its plan was unusable: those tokens were wasted.
+      if (result && !(err instanceof ProviderError)) attachBreakdown(ws, 0, result.model, { wasted: result.usage.totalTokens });
       const reason = err instanceof ProviderError ? err.reason : `invalid plan (${(err as Error).message})`;
       attempts.push({ provider: target.provider, kind: err instanceof ProviderError ? err.kind : "invalid_plan", reason });
       const next = targets[i + 1];

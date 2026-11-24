@@ -17,11 +17,13 @@ export const UI_HTML = /* html */ `<!doctype html>
     --bg: #ffffff; --side: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e6e6e1;
     --accent: #3b5bdb; --accent-soft: #edf1ff; --ok: #2b8a3e; --warn: #c2410c; --code: #f3f3f0; --bubble: #f1f1ee;
     --shadow: 0 2px 10px rgba(0,0,0,.06);
+    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4; --c6: #008300; --c7: #6250d6; --c8: #e34948;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #171717; --side: #1f1f1f; --panel: #1f1f1f; --text: #ececea; --muted: #9a9a94; --line: #2f2f2d;
       --accent: #7b93ff; --accent-soft: #232a45; --ok: #5cc06e; --warn: #f08a4b; --code: #262626; --bubble: #2a2a2a;
-      --shadow: 0 2px 12px rgba(0,0,0,.4); }
+      --shadow: 0 2px 12px rgba(0,0,0,.4);
+      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #0ca30c; --c7: #9085e9; --c8: #e66767; }
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -29,6 +31,12 @@ export const UI_HTML = /* html */ `<!doctype html>
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   button { font: inherit; color: inherit; cursor: pointer; }
   input, select, textarea { font: inherit; color: var(--text); }
+  .segbar { display: flex; gap: 2px; height: 10px; margin: 2px 0 10px; }
+  .segbar span { min-width: 2px; }
+  .segbar span:first-child { border-radius: 4px 0 0 4px; }
+  .segbar span:last-child { border-radius: 0 4px 4px 0; }
+  .segbar span:only-child { border-radius: 4px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
   [hidden] { display: none !important; }
 
   .app { display: grid; grid-template-columns: 272px minmax(0, 1fr) auto; height: 100vh; height: 100dvh; }
@@ -841,7 +849,9 @@ export const UI_HTML = /* html */ `<!doctype html>
     $("usageSummary").textContent = short(usageData.today.total.totalTokens) + " today";
     const d = usageData[usagePeriod];
     if (!d.byModel.length) { $("usageBody").replaceChildren(el("p", { className: "muted", textContent: usagePeriod === "today" ? "No tokens used today yet." : "No usage recorded yet." })); return; }
+    const bd = d.breakdown && Object.values(d.breakdown).some((n) => n > 0) ? breakdownView(d.breakdown, true) : null;
     $("usageBody").replaceChildren(
+      ...(bd ? [bd] : []),
       table(["Model", "Calls", "Tokens"], d.byModel.map((m) => [el("span", {}, m.model, el("div", { className: "muted", textContent: PROVIDER_LABEL[m.provider] || m.provider })), fmt(m.calls), short(m.totalTokens)]), [1, 2]),
       el("p", { className: "muted", textContent: fmt(d.total.totalTokens) + " tokens · " + d.runs + " runs" }));
   }
@@ -942,6 +952,18 @@ export const UI_HTML = /* html */ `<!doctype html>
     if (rec.usage && rec.usage.byModel && rec.usage.byModel.length) {
       out.push(sec("Tokens by model", "", table(["Model", "Calls", "In", "Out", "Total"], rec.usage.byModel.map((m) => [m.provider + "/" + m.model, m.calls, fmt(m.promptTokens), fmt(m.completionTokens), fmt(m.totalTokens)]), [1, 2, 3, 4])));
     }
+    if (rec.breakdown) {
+      out.push(sec("Where the tokens went", fmt(Object.values(rec.breakdown).reduce((s, n) => s + n, 0)) + " tokens", breakdownView(rec.breakdown, false),
+        el("p", { className: "muted", style: "margin:6px 0 0", textContent: "Input-side categories split the provider's input total by how much text each part of the prompt takes, so they're estimates. Output and thinking are measured (thinking only when the provider reports it or streams it)." })));
+      const steps = (rec.calls || []).filter((c) => c.breakdown);
+      if (steps.length) {
+        out.push(sec("Tokens by step", "", table(["Step", "Model", "Underst.", "Instr.", "Request", "Context", "Code", "Other", "Thinking", "Wasted"],
+          steps.map((c) => { const b = c.breakdown; return [c.step === 0 ? "plan" : c.step, c.model, short(b.understanding), short(b.instructions), short(b.request), short(b.context), short(b.code), short(b.otherText), short(b.thinking), short(b.wasted)]; }),
+          [2, 3, 4, 5, 6, 7, 8, 9])));
+      }
+    } else if (rec.status !== "gated") {
+      out.push(sec("Where the tokens went", "", el("p", { className: "muted", textContent: "Not recorded for runs made before this update." })));
+    }
     if ((rec.executionLogs || []).length) {
       out.push(sec("Relay log", rec.executionLogs.length + " entries", el("ol", { className: "dlog" }, ...rec.executionLogs.map((l) =>
         el("li", {}, el("span", { className: "muted", textContent: time(l.timestamp) + " [" + l.step + "] " }), el("span", { className: "ev " + l.event, textContent: l.event }),
@@ -965,6 +987,39 @@ export const UI_HTML = /* html */ `<!doctype html>
     const live = liveSection();
     if (live && liveEvents.some((x) => x.ev.type === "done" && x.ev.historyId === rec.id)) out.splice(1, 0, live);
     body.replaceChildren(...out);
+  }
+
+  // Token breakdown by purpose. Fixed category order = fixed colour slot (never reassigned).
+  const BREAKDOWN = [
+    ["understanding", "Understanding", "planning: reading the request, choosing files", "measured"],
+    ["instructions", "Instructions", "Baton's rules + the assignment in each prompt", "estimated share of input"],
+    ["request", "Your request", "the goal and earlier requests", "estimated share of input"],
+    ["context", "Context", "decisions, file list, files from earlier steps", "estimated share of input"],
+    ["code", "Code written", "the file content that went into the project", "measured share of output"],
+    ["otherText", "Other reply text", "explanations, fences, chatter around the file", "measured share of output"],
+    ["thinking", "Thinking", "hidden reasoning before answering", "reported by provider, or estimated"],
+    ["wasted", "Wasted", "replies Baton couldn't use (e.g. a bad plan)", "measured"],
+  ];
+  function breakdownView(b, compact) {
+    const rows = BREAKDOWN.map(([k, name, what, how], i) => ({ k, name, what, how, color: "var(--c" + (i + 1) + ")", v: b[k] || 0 }));
+    const total = rows.reduce((s, r) => s + r.v, 0);
+    if (!total) return el("p", { className: "muted", textContent: "No token data for this." });
+    const pct = (v) => (total ? (100 * v / total) : 0);
+    const bar = el("div", { className: "segbar", role: "img", "aria-label": "Token breakdown" },
+      ...rows.filter((r) => r.v > 0).map((r) => {
+        const seg = el("span", { title: r.name + ": " + fmt(r.v) + " tokens (" + pct(r.v).toFixed(1) + "%)" });
+        seg.style.flex = String(r.v); seg.style.background = r.color;
+        return seg;
+      }));
+    const shown = rows.filter((r) => r.v > 0 || !compact);
+    const t = table(compact ? ["Where", "Tokens", "%"] : ["Where the tokens went", "Tokens", "%", "How measured"],
+      shown.map((r) => {
+        const nameCell = el("span", {}, el("span", { className: "swatch" }), r.name);
+        nameCell.firstChild.style.background = r.color;
+        nameCell.title = r.what;
+        return compact ? [nameCell, short(r.v), pct(r.v).toFixed(0) + "%"] : [nameCell, fmt(r.v), pct(r.v).toFixed(1) + "%", r.how];
+      }), [1, 2]);
+    return el("div", {}, bar, t);
   }
 
   function contextSection(rec) {
