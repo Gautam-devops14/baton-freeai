@@ -71,7 +71,7 @@ test("export endpoints return zips; unknown chat -> 404; 'all' includes every ch
   const one = await app.inject({ method: "GET", url: `/api/export/chat/${chatId}` });
   assert.equal(one.statusCode, 200);
   assert.equal(one.headers["content-type"], "application/zip");
-  assert.match(String(one.headers["content-disposition"]), /baton-chat-.*\.zip/);
+  assert.match(String(one.headers["content-disposition"]), /todo-page-chat-export-.*\.zip/);
   assert.equal(one.rawPayload.subarray(0, 2).toString(), "PK");
   assert.equal((await app.inject({ method: "GET", url: "/api/export/chat/ws_nope" })).statusCode, 404);
   const all = await app.inject({ method: "GET", url: "/api/export/all" });

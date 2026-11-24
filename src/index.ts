@@ -16,7 +16,13 @@ import { OPENAI_BASE_URL, OPENAI_MODELS } from "./providers/openai.js";
 import { OPENROUTER_BASE_URL, OPENROUTER_MODELS } from "./providers/openrouter.js";
 import { WORKSPACE_TTL_SECONDS } from "./services/storage.js";
 import { testKeys } from "./services/keytest.js";
-import { allExportFiles, chatExportFiles } from "./services/export.js";
+import { allExportFiles, chatExportFiles, groupChats } from "./services/export.js";
+import { cleanProjectName, defaultProjectName, slugify } from "./services/project.js";
+import { diffFile } from "./services/diff.js";
+import { computeHealth } from "./services/health.js";
+import { buildTargets as targetsFor } from "./services/orchestrator.js";
+import { chatCompletion, ProviderError } from "./providers/client.js";
+import type { CallTrace } from "./types.js";
 
 const STARTED_AT = new Date().toISOString();
 import { FileHistoryStore, HISTORY_ID_RE, type HistoryStore } from "./services/history.js";
@@ -176,7 +182,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   app.get<{ Params: { chatId: string } }>("/api/export/chat/:chatId", async (req, reply) => {
     const files = HISTORY_ID_RE.test(req.params.chatId) ? await chatExportFiles(history, req.params.chatId) : undefined;
     if (!files) return reply.code(404).send({ status: "error", error: "not_found", message: "No such chat in history." });
-    return sendZip(reply, `baton-chat-${stamp()}.zip`, files);
+    const meta = await history.getChatMeta(req.params.chatId);
+    const first = groupChats(await history.list(Number.MAX_SAFE_INTEGER)).get(req.params.chatId)?.[0];
+    const name = slugify(meta?.projectName ?? defaultProjectName(first?.userPrompt ?? "chat"));
+    return sendZip(reply, `${name}-chat-export-${stamp()}.zip`, files);
   });
 
   app.get("/api/export/all", async (_req, reply) => sendZip(reply, `baton-all-chats-${stamp()}.zip`, await allExportFiles(history, await debugInfo())));
@@ -219,6 +228,111 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
     return reply.code(204).send();
   });
 
+  // ---- Project names (per chat): used for downloads and exports ----
+  /** The chat a run belongs to, its project name (set by the user or derived from the first prompt). */
+  const projectFor = async (runId: string): Promise<{ chatId: string; name: string; custom: boolean } | undefined> => {
+    const rec = await history.get(runId);
+    if (!rec) return undefined;
+    const runs = await history.list(Number.MAX_SAFE_INTEGER);
+    const chats = groupChats(runs);
+    const chatId = [...chats].find(([, list]) => list.some((r) => r.id === runId))?.[0] ?? rec.chatId ?? rec.id;
+    const meta = await history.getChatMeta(chatId);
+    if (meta?.projectName) return { chatId, name: meta.projectName, custom: true };
+    const first = chats.get(chatId)?.[0];
+    return { chatId, name: defaultProjectName(first?.userPrompt ?? rec.userPrompt), custom: false };
+  };
+
+  app.get("/api/chats", async () => {
+    const runs = await history.list(Number.MAX_SAFE_INTEGER);
+    const metas = new Map((await history.listChatMeta()).map((m) => [m.chatId, m]));
+    return {
+      chats: [...groupChats(runs)].map(([chatId, list]) => ({
+        chatId,
+        projectName: metas.get(chatId)?.projectName ?? defaultProjectName(list[0].userPrompt),
+        custom: Boolean(metas.get(chatId)?.projectName),
+        slug: slugify(metas.get(chatId)?.projectName ?? defaultProjectName(list[0].userPrompt)),
+      })),
+    };
+  });
+
+  app.put<{ Params: { chatId: string }; Body: { projectName?: string } }>(
+    "/api/chats/:chatId",
+    { schema: { body: { type: "object", properties: { projectName: { type: "string", maxLength: 200 } } } } },
+    async (req, reply) => {
+      if (!HISTORY_ID_RE.test(req.params.chatId)) return reply.code(400).send({ status: "error", error: "bad_id" });
+      const name = req.body.projectName === "" ? "" : cleanProjectName(req.body.projectName);
+      if (name === undefined) return reply.code(400).send({ status: "error", error: "bad_name", message: "Project name must be 1-80 characters." });
+      const meta = { chatId: req.params.chatId, projectName: name || undefined, updatedAt: new Date().toISOString() };
+      await history.setChatMeta(meta);
+      return { ...meta, slug: name ? slugify(name) : undefined };
+    },
+  );
+
+  // ---- Diff: what a run changed in each file, versus the run it continued ----
+  app.get<{ Params: { id: string } }>("/api/history/:id/diff", async (req, reply) => {
+    const rec = await history.get(req.params.id);
+    if (!rec) return reply.code(404).send({ status: "error", error: "not_found" });
+    const parent = rec.parentId ? await history.get(rec.parentId) : undefined;
+    const before = parent?.artifacts ?? {};
+    const changed = rec.changes ? [...rec.changes.modified, ...rec.changes.added] : Object.keys(rec.artifacts);
+    return {
+      runId: rec.id,
+      parentId: parent?.id,
+      files: changed.map((p) => diffFile(p, before[p], rec.artifacts[p])),
+    };
+  });
+
+  // ---- Provider health: success rate, speed and errors per provider/model ----
+  app.get<{ Querystring: { days?: string } }>("/api/health", async (req) => {
+    const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 365);
+    const since = new Date(Date.now() - days * 86_400_000).toISOString();
+    const runs = (await history.list(Number.MAX_SAFE_INTEGER)).filter((r) => r.createdAt >= since);
+    const calls: CallTrace[] = [];
+    for (const r of runs) calls.push(...((await history.get(r.id))?.calls ?? []));
+    const rows = computeHealth(calls);
+    // Providers Baton is skipping right now (busy, key rejected, no credit...), with the reason.
+    return { since, runs: runs.length, models: rows, skipping: snapshotMemory().busyProviders };
+  });
+
+  // ---- Replay: send one step's exact recorded prompt to a chosen provider/model ----
+  app.post<{ Body: { historyId: string; step: number; provider: string; model?: string; keys: OrchestrateRequest["keys"] } }>(
+    "/api/replay",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["historyId", "step", "provider", "keys"],
+          properties: {
+            historyId: { type: "string", pattern: "^(ws|run)_[A-Za-z0-9_]+$" },
+            step: { type: "integer", minimum: 0, maximum: 100 },
+            provider: { type: "string", enum: ["nvidia", "groq", "google", "openrouter", "openai"] },
+            model: { type: "string", maxLength: 200 },
+            keys: orchestrateSchema.body.properties.keys,
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      const rec = await history.get(req.body.historyId);
+      const ctx = rec?.contexts?.find((c) => c.step === req.body.step);
+      if (!rec || !ctx) return reply.code(404).send({ status: "error", error: "not_found", message: "No recorded prompt for that run and step." });
+      const keys = Object.fromEntries(Object.entries(req.body.keys ?? {}).map(([k, v]) => [k, typeof v === "string" ? v.trim() || undefined : undefined]));
+      const base = targetsFor(keys, rec.taskType, [req.body.provider]).relay[0];
+      if (!base) return reply.code(400).send({ status: "error", error: "missing_keys", message: `Add a key for ${req.body.provider} to replay with it.` });
+      const model = req.body.model?.trim();
+      // A specific model: exactly that one (no fallbacks). Otherwise the provider's normal model list.
+      const target = model ? { ...base, model, fallbackModels: [], modelHints: undefined } : base;
+      const started = Date.now();
+      try {
+        const r = await chatCompletion(target, ctx.messages, ctx.kind === "plan" ? { jsonMode: true, temperature: 0.1 } : {});
+        return { ok: true, provider: target.provider, model: r.model, latencyMs: Date.now() - started, usage: r.usage, reply: r.content, skippedModels: r.skippedModels };
+      } catch (err) {
+        const pe = err instanceof ProviderError ? err : undefined;
+        return { ok: false, provider: target.provider, model: pe?.model ?? target.model, latencyMs: Date.now() - started, error: pe ? pe.reason : String((err as Error)?.message ?? err), kind: pe?.kind };
+      }
+    },
+  );
+
   app.get<{ Params: { workspaceId: string } }>("/api/download/:workspaceId", async (req, reply) => {
     const { workspaceId } = req.params;
     // Live workspace first, then history (so downloads survive restarts and the 1h workspace TTL).
@@ -228,10 +342,13 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
     if (!artifacts || Object.keys(artifacts).length === 0) {
       return reply.code(404).send({ status: "error", error: "not_found", message: "Workspace not found or expired." });
     }
+    // Named after the project: student-portal.zip with a student-portal/ folder inside.
+    const project = await projectFor(workspaceId).catch(() => undefined);
+    const slug = project ? slugify(project.name) : workspaceId;
     reply
       .header("Content-Type", "application/zip")
-      .header("Content-Disposition", `attachment; filename="${workspaceId}.zip"`);
-    return reply.send(createArtifactZip(artifacts));
+      .header("Content-Disposition", `attachment; filename="${slug}.zip"`);
+    return reply.send(createArtifactZip(artifacts, project ? slug : undefined));
   });
 
   return app;

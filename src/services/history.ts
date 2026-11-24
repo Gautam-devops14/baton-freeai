@@ -51,8 +51,18 @@ export type HistorySummary = Omit<HistoryRecord, "executionLogs" | "artifacts" |
   logCount: number;
 };
 
+/** Per-chat settings the user chooses (e.g. the project name used for downloads). */
+export interface ChatMeta {
+  chatId: string;
+  projectName?: string;
+  updatedAt: string;
+}
+
 export interface HistoryStore {
   add(record: HistoryRecord): Promise<void>;
+  getChatMeta(chatId: string): Promise<ChatMeta | undefined>;
+  setChatMeta(meta: ChatMeta): Promise<void>;
+  listChatMeta(): Promise<ChatMeta[]>;
   /** Newest first. */
   list(limit?: number): Promise<HistorySummary[]>;
   get(id: string): Promise<HistoryRecord | undefined>;
@@ -83,6 +93,7 @@ export function summarize(record: HistoryRecord): HistorySummary {
  */
 export class FileHistoryStore implements HistoryStore {
   private readonly runsDir: string;
+  private readonly chatsDir: string;
   private index?: Map<string, HistorySummary>;
   private loading?: Promise<Map<string, HistorySummary>>;
 
@@ -91,6 +102,46 @@ export class FileHistoryStore implements HistoryStore {
     private readonly maxRuns = Number(process.env.BATON_HISTORY_MAX ?? 500),
   ) {
     this.runsDir = join(dir, "runs");
+    this.chatsDir = join(dir, "chats");
+  }
+
+  private chatFile(chatId: string) {
+    if (!HISTORY_ID_RE.test(chatId)) throw new Error(`invalid chat id: ${chatId}`);
+    return join(this.chatsDir, `${chatId}.json`);
+  }
+
+  async getChatMeta(chatId: string): Promise<ChatMeta | undefined> {
+    if (!HISTORY_ID_RE.test(chatId)) return undefined;
+    try {
+      return JSON.parse(await readFile(this.chatFile(chatId), "utf8")) as ChatMeta;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async setChatMeta(meta: ChatMeta): Promise<void> {
+    await mkdir(this.chatsDir, { recursive: true });
+    const path = this.chatFile(meta.chatId);
+    const tmp = `${path}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(meta));
+    await rename(tmp, path);
+  }
+
+  async listChatMeta(): Promise<ChatMeta[]> {
+    try {
+      const names = (await readdir(this.chatsDir)).filter((n) => n.endsWith(".json"));
+      const out: ChatMeta[] = [];
+      for (const n of names) {
+        try {
+          out.push(JSON.parse(await readFile(join(this.chatsDir, n), "utf8")) as ChatMeta);
+        } catch {
+          // skip unreadable files
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
   }
 
   private file(id: string) {
@@ -161,5 +212,6 @@ export class FileHistoryStore implements HistoryStore {
   async clear() {
     const index = await this.load();
     for (const id of [...index.keys()]) await this.delete(id);
+    await rm(this.chatsDir, { recursive: true, force: true });
   }
 }
