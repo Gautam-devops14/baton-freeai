@@ -18,7 +18,7 @@ const matches = (id: string, h: ModelHint) => (typeof h === "string" ? id.toLowe
  * Order candidate model IDs: drop non-chat models and ones already known to be
  * unavailable; rank by the first hint each matches (earlier hint = better),
  * then newest-looking ID first (gemini-3.8 before gemini-3.5). Models matching
- * no hint are only used if nothing matched.
+ * no hint are never picked.
  */
 export function rankModels(ids: string[], hints: ModelHint[], exclude: Set<string>, limit = 3): string[] {
   const clean = [...new Set(ids.map((id) => id.replace(/^models\//, "")))].filter(
@@ -29,8 +29,9 @@ export function rankModels(ids: string[], hints: ModelHint[], exclude: Set<strin
     return { id, score: i === -1 ? hints.length : i };
   });
   scored.sort((a, b) => a.score - b.score || b.id.localeCompare(a.id, undefined, { numeric: true }));
-  const matched = scored.filter((s) => s.score < hints.length);
-  return (matched.length ? matched : scored).slice(0, limit).map((s) => s.id);
+  // Only models that match a preference: an unknown model (e.g. "recursive/flint-v1.0")
+  // is more likely to hang or misbehave than to help.
+  return scored.filter((s) => s.score < hints.length).slice(0, limit).map((s) => s.id);
 }
 
 /** List model IDs from `<baseUrl>/models`. Returns [] on any failure: discovery is best-effort. */

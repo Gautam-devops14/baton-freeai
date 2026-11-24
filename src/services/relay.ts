@@ -14,6 +14,8 @@ const DEFAULT_COOLDOWN_MS = 60_000;
 const UNKNOWN_RATE_RESET_MS = 10_000;
 /** Longest Baton will wait for a rate limit before giving up on a file (second chance). */
 const maxRateWaitMs = () => Number(process.env.BATON_MAX_RATE_WAIT_MS ?? 20_000);
+/** Rate limits resetting within this are waited out immediately, before trying other providers. */
+const shortRateWaitMs = () => Number(process.env.BATON_SHORT_RATE_WAIT_MS ?? 8_000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const PROVIDER_NAMES: Record<string, string> = {
@@ -125,7 +127,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
     const candidates = notBusy;
 
     /** One attempt on one provider. Returns the error on failure, undefined on success. */
-    const attempt = async (target: ProviderTarget, isLast: boolean, nextLabel: string | undefined) => {
+    const attempt = async (target: ProviderTarget, isLast: boolean, nextLabel: string | undefined, mayWaitShort = false) => {
       try {
         const result = await chatCompletion(target, messages, {
           retryOverloaded: isLast, // last resort: a short wait beats failing the task
@@ -154,14 +156,22 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
           // Won't fix itself mid-run: stop asking this provider for the rest of the request.
           cooldowns.set(keyOf(target), Number.POSITIVE_INFINITY);
         }
+        // A rate limit that resets within seconds (e.g. Groq "try again in 2s") is cheaper to wait out
+        // than a detour through slower, less reliable providers.
+        const shortWait =
+          mayWaitShort && pe.kind === "rate_limit" && pe.retryAfterMs !== undefined && pe.retryAfterMs <= shortRateWaitMs() && busyUntilFor(target) === undefined
+            ? pe.retryAfterMs + 250
+            : undefined;
         log(
           ws,
           task.id,
           "failover",
           { ...target, model: pe.model ?? pe.skippedModels.at(-1)?.model ?? target.model },
-          nextLabel ? `${pe.reason}; passing baton to ${nextLabel}` : `${pe.reason}; no providers left for ${task.targetArtifact}`,
+          shortWait !== undefined
+            ? `${pe.reason}; waiting ${(shortWait / 1000).toFixed(1)}s for ${target.provider}'s rate limit to reset, then retrying`
+            : nextLabel ? `${pe.reason}; passing baton to ${nextLabel}` : `${pe.reason}; no providers left for ${task.targetArtifact}`,
         );
-        return { pe, at: now() };
+        return { pe, at: now(), shortWait };
       }
     };
 
@@ -169,7 +179,13 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
     const rateLimited: Array<{ target: ProviderTarget; readyAt: number }> = [];
     for (const [i, target] of candidates.entries()) {
       const next = candidates[i + 1];
-      const failure = await attempt(target, i === candidates.length - 1, next && (PROVIDER_NAMES[next.provider] ?? next.provider));
+      const nextLabel = next && (PROVIDER_NAMES[next.provider] ?? next.provider);
+      let failure = await attempt(target, i === candidates.length - 1, nextLabel, true);
+      if (failure?.shortWait !== undefined) {
+        await sleep(failure.shortWait);
+        cooldowns.delete(keyOf(target));
+        failure = await attempt(target, i === candidates.length - 1, nextLabel);
+      }
       if (!failure) break;
       if (failure.pe.kind === "rate_limit" && busyUntilFor(target) === undefined) {
         rateLimited.push({ target, readyAt: failure.at + (failure.pe.retryAfterMs ?? UNKNOWN_RATE_RESET_MS) });

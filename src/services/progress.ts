@@ -33,7 +33,9 @@ function channel(id: string): Channel {
 export function progressEmitter(id: string): (e: ProgressEvent) => void {
   return (e) => {
     const c = channel(id);
-    if (c.events.length < MAX_BUFFER) c.events.push(e);
+    // Streaming progress ticks are only useful live; don't fill the replay buffer with them.
+    const isTick = e.type === "call" && e.call.phase === "progress";
+    if (!isTick && c.events.length < MAX_BUFFER) c.events.push(e);
     for (const l of c.listeners) l(e);
     if (e.type === "done") {
       c.done = true;

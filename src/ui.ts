@@ -637,6 +637,9 @@ export const UI_HTML = /* html */ `<!doctype html>
           if (c.phase === "start") {
             const li = el("li", {}, el("span", { className: "ic wait" }, el("span", { className: "spinner" })), el("span", { textContent: where + ": calling " + c.provider + "/" + c.model + "..." }));
             list.append(li); calls.set(key, li); scrollBottom();
+          } else if (c.phase === "progress") {
+            const li = calls.get(key);
+            if (li && li.lastChild) li.lastChild.textContent = where + ": " + c.provider + "/" + c.model + " is writing... " + short(c.chars || 0) + " chars received";
           } else {
             const li = calls.get(key) || add("", "", "");
             const ok = c.outcome === "ok";
@@ -679,7 +682,13 @@ export const UI_HTML = /* html */ `<!doctype html>
     try {
       es = new EventSource("/api/progress/" + clientRunId);
       es.onmessage = (m) => {
-        try { const ev = JSON.parse(m.data); liveEvents.push({ at: new Date().toISOString(), ev }); pending.onEvent(ev); renderLive(); } catch {}
+        try {
+          const ev = JSON.parse(m.data);
+          pending.onEvent(ev);
+          if (ev.type === "call" && ev.call.phase === "progress") return; // streaming ticks: live line only, not the event log
+          liveEvents.push({ at: new Date().toISOString(), ev });
+          renderLive();
+        } catch {}
       };
     } catch {}
 

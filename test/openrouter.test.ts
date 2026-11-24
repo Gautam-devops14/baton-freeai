@@ -19,7 +19,8 @@ test("OpenRouter target: endpoint, free models, no JSON mode, attribution header
   const t = target();
   assert.equal(t.provider, "openrouter");
   assert.equal(t.baseUrl, "https://openrouter.ai/api/v1");
-  assert.ok([t.model, ...(t.fallbackModels ?? [])].every((m) => m.endsWith(":free")), "defaults are all free models");
+  // OpenRouter's own free router: always routes to a model that is free right now.
+  assert.deepEqual([t.model, ...(t.fallbackModels ?? [])], ["openrouter/free"]);
   let headers: any, body: any;
   globalThis.fetch = (async (url: any, init: any) => { headers = init.headers; body = JSON.parse(init.body); return reply("ok"); }) as any;
   await chatCompletion(t, [], { jsonMode: true });
@@ -37,7 +38,7 @@ test("OpenRouter discovery only ever picks ':free' models", async () => {
   });
   const r = await chatCompletion(target(), []);
   assert.equal(r.model, "qwen/qwen9-coder:free");
-  assert.ok(!calls.some((c) => c.model && !c.model.endsWith(":free")), "never calls a paid model");
+  assert.ok(!calls.some((c) => c.model && !/:free$|^openrouter\/free$/.test(c.model)), "never calls a paid model");
 });
 
 test("OpenRouter's free daily cap skips it for an hour (not just this run)", async () => {

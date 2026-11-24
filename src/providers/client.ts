@@ -50,7 +50,7 @@ export class ProviderError extends Error {
   /** Short human-readable reason used in execution logs. */
   get reason(): string {
     const base = this.baseReason();
-    const showDetail = this.detail && ["client", "model_unavailable", "auth", "bad_response", "server"].includes(this.kind);
+    const showDetail = this.detail && ["client", "model_unavailable", "auth", "bad_response", "server", "timeout"].includes(this.kind);
     return showDetail ? `${base}: ${this.detail}` : base;
   }
 
@@ -95,7 +95,14 @@ export interface ChatOptions {
   onTrace?: (t: CallTrace) => void;
   /** Run/step the calls belong to, copied into each trace. */
   traceMeta?: { runId?: string; step?: number };
+  /** Max gap between streamed chunks before giving up (default BATON_STREAM_IDLE_TIMEOUT_MS). */
+  idleTimeoutMs?: number;
+  /** Internal: called while a reply streams in, with characters received so far. */
+  onStreamProgress?: (chars: number) => void;
 }
+
+/** First-chunk timeout for models picked by discovery: unknown models get less patience. */
+const discoveredTimeoutMs = () => Number(process.env.BATON_DISCOVERED_TIMEOUT_MS ?? 15_000);
 
 const dailyLimitSkipMs = () => Number(process.env.BATON_DAILY_LIMIT_SKIP_MS ?? 3600_000);
 const noCreditSkipMs = () => Number(process.env.BATON_NO_CREDIT_SKIP_MS ?? 3600_000);
@@ -263,9 +270,10 @@ export async function chatCompletion(
     if (found.length && skippedModels.length) {
       Object.assign(skippedModels[skippedModels.length - 1], { next: found[0], nextDiscovered: true });
     }
+    const discoveredOpts = { ...opts, timeoutMs: Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, discoveredTimeoutMs()) };
     for (const [i, model] of found.entries()) {
       try {
-        const { content, usage } = await requestOnce(target, model, messages, opts);
+        const { content, usage } = await requestOnce(target, model, messages, discoveredOpts);
         target.fallbackModels = [...(target.fallbackModels ?? []), model]; // reuse it for the rest of the run
         rememberDiscoveredModel(target, model); // ...and in later runs
         clearProviderBusy(target);
@@ -329,7 +337,10 @@ async function requestOnce(
     opts.onTrace?.(t);
   };
   try {
-    const result = await requestUntraced(target, model, messages, opts);
+    const result = await requestUntraced(target, model, messages, {
+      ...opts,
+      onStreamProgress: opts.onTrace ? (chars) => opts.onTrace!({ phase: "progress", at: new Date().toISOString(), ...base, chars }) : undefined,
+    });
     finish({ status: 200, outcome: "ok", tokens: result.usage });
     return result;
   } catch (err) {
@@ -340,30 +351,84 @@ async function requestOnce(
   }
 }
 
+/** Turn an HTTP error (or an error object sent mid-stream) into a classified ProviderError. */
+function classifyError(target: ProviderTarget, model: string, status: number, raw: string, retryAfterHeader: string | null): ProviderError {
+  const detail = raw.slice(0, 300);
+  const retryAfterMs = retryHint(retryAfterHeader, raw);
+  const said = providerMessage(raw);
+  if ((status === 429 || status === 402) && BILLING_TEXT.test(detail)) {
+    markProviderBusy(target, noCreditSkipMs(), SKIP_REASONS.noCredit); // won't fix itself soon: skip in later runs too
+    return new ProviderError(`${target.provider} has no credit: ${detail}`, "billing", status);
+  }
+  if (status === 429 && DAILY_LIMIT_TEXT.test(detail)) {
+    markProviderBusy(target, dailyLimitSkipMs(), SKIP_REASONS.dailyLimit);
+    return new ProviderError(`${target.provider} daily limit reached: ${detail}`, "rate_limit", status, retryAfterMs, [], said);
+  }
+  if (status === 429 || RATE_LIMIT_TEXT.test(detail)) {
+    return new ProviderError(`${target.provider} rate limited: ${detail}`, "rate_limit", status, retryAfterMs);
+  }
+  if (status === 404 || status === 410 || ([400, 403, 422].includes(status) && MODEL_UNAVAILABLE_TEXT.test(detail))) {
+    return new ProviderError(`${target.provider} model ${model} unavailable: ${detail}`, "model_unavailable", status, undefined, [], said);
+  }
+  if (status === 401 || status === 403 || (status === 400 && BAD_KEY_TEXT.test(detail))) {
+    markProviderBusy(target, keyRejectedSkipMs(), SKIP_REASONS.keyRejected);
+    return new ProviderError(`${target.provider} auth failed: ${detail}`, "auth", status, undefined, [], said);
+  }
+  if (status === 503 || status === 502 || (status >= 500 && OVERLOAD_TEXT.test(detail))) {
+    return new ProviderError(`${target.provider} model ${model} overloaded: ${detail}`, "overloaded", status, retryAfterMs);
+  }
+  if (status >= 500) return new ProviderError(`${target.provider} server error: ${detail}`, "server", status, retryAfterMs, [], said);
+  return new ProviderError(`${target.provider} rejected request: ${detail}`, "client", status, undefined, [], said);
+}
+
+/** Some OpenAI-compatible servers reject stream_options; retry without it once. */
+const STREAM_OPTIONS_REJECTED = /stream_options|include_usage|extra inputs are not permitted|unrecognized request argument/i;
+
+const streamIdleMs = () => Number(process.env.BATON_STREAM_IDLE_TIMEOUT_MS ?? 20_000);
+const maxCallMs = () => Number(process.env.BATON_MAX_CALL_MS ?? 180_000);
+
+/**
+ * One HTTP call. Streams the reply (stream: true) so timeouts can tell "slow but
+ * working" from "stuck":
+ *  - no first chunk within timeoutMs (default 30s; 15s for discovered models) -> timeout
+ *  - a gap longer than BATON_STREAM_IDLE_TIMEOUT_MS (20s) mid-reply          -> timeout
+ *  - longer than BATON_MAX_CALL_MS overall (180s)                             -> timeout
+ * A model still writing a long file is never cut off at 30s. Providers that
+ * answer with plain JSON instead of a stream are handled too.
+ */
 async function requestUntraced(
   target: ProviderTarget,
   model: string,
   messages: ChatMessage[],
   opts: ChatOptions,
+  allowStreamOptions = true,
 ): Promise<{ content: string; usage: TokenUsage }> {
   const url = `${target.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const body: Record<string, unknown> = {
-    model,
-    messages,
-  };
+  const body: Record<string, unknown> = { model, messages, stream: true };
+  if (allowStreamOptions && target.streamUsage !== false) body.stream_options = { include_usage: true };
   if (target.sendTemperature !== false) body.temperature = opts.temperature ?? 0.2;
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
   if (opts.jsonMode && target.supportsJsonMode !== false) body.response_format = { type: "json_object" };
 
-  // The timer spans the whole exchange (headers AND body), so a provider that
-  // stalls mid-stream still trips failover instead of hanging the request.
+  const firstMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const idleMs = opts.idleTimeoutMs ?? streamIdleMs();
+  const totalMs = maxCallMs();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const started = Date.now();
+  const state: { lastChunk: number; why: string; cancel?: () => void } = { lastChunk: 0, why: "" };
+  const watchdog = setInterval(() => {
+    const t = Date.now();
+    if (!state.lastChunk && t - started > firstMs) state.why = `no response within ${Math.round(firstMs / 1000)}s`;
+    else if (state.lastChunk && t - state.lastChunk > idleMs) state.why = `reply stalled for ${Math.round(idleMs / 1000)}s`;
+    else if (t - started > totalMs) state.why = `call exceeded ${Math.round(totalMs / 1000)}s`;
+    if (state.why) {
+      controller.abort();
+      state.cancel?.(); // also stop a body read that ignores the abort signal
+    }
+  }, Math.max(10, Math.min(250, firstMs / 2)));
 
-  let res: Response;
-  let raw: string;
   try {
-    res = await fetch(url, {
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -373,63 +438,85 @@ async function requestUntraced(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    raw = await res.text();
+
+    if (!res.ok) {
+      const raw = await res.text();
+      if (allowStreamOptions && body.stream_options && res.status === 400 && STREAM_OPTIONS_REJECTED.test(raw)) {
+        clearInterval(watchdog);
+        return requestUntraced(target, model, messages, opts, false);
+      }
+      throw classifyError(target, model, res.status, raw, res.headers.get("retry-after"));
+    }
+
+    // Plain JSON reply (provider ignored stream: true).
+    if (!(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
+      const raw = await res.text();
+      state.lastChunk = Date.now();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new ProviderError(`${target.provider} returned non-JSON body`, "bad_response", res.status);
+      }
+      const content = (parsed as any)?.choices?.[0]?.message?.content;
+      return finishContent(target, res.status, messages, typeof content === "string" ? content : "", parsed);
+    }
+
+    // Server-Sent Events stream.
+    const reader = res.body!.getReader();
+    state.cancel = () => void reader.cancel().catch(() => {});
+    const decoder = new TextDecoder();
+    let buf = "";
+    let content = "";
+    let usage: unknown;
+    let lastProgress = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      state.lastChunk = Date.now();
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue; // comments (": keep-alive") and blank lines
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") continue;
+        let j: any;
+        try {
+          j = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (j.error) {
+          const code = Number(j.error.code ?? j.error.status);
+          throw classifyError(target, model, Number.isFinite(code) && code >= 400 ? code : 500, JSON.stringify(j), null);
+        }
+        const delta = j.choices?.[0]?.delta;
+        if (typeof delta?.content === "string") content += delta.content;
+        if (j.usage) usage = j.usage;
+      }
+      if (opts.onStreamProgress && state.lastChunk - lastProgress > 500) {
+        lastProgress = state.lastChunk;
+        opts.onStreamProgress(content.length);
+      }
+    }
+    if (controller.signal.aborted) throw new ProviderError("aborted", "timeout"); // reader was cancelled by the watchdog
+    return finishContent(target, res.status, messages, content, usage ? { usage } : undefined);
   } catch (err) {
+    if (err instanceof ProviderError && !(err.kind === "timeout" && err.message === "aborted")) throw err;
     if (controller.signal.aborted) {
-      throw new ProviderError(`${target.provider} timed out`, "timeout");
+      throw new ProviderError(`${target.provider} timed out (${state.why || "aborted"})`, "timeout", undefined, undefined, [], state.why || undefined);
     }
     throw new ProviderError(`${target.provider} network failure: ${(err as Error).message}`, "network");
   } finally {
-    clearTimeout(timer);
+    clearInterval(watchdog);
   }
+}
 
-  if (!res.ok) {
-    const detail = raw.slice(0, 300);
-    const retryAfterMs = retryHint(res.headers.get("retry-after"), raw);
-    if ((res.status === 429 || res.status === 402) && BILLING_TEXT.test(detail)) {
-      markProviderBusy(target, noCreditSkipMs(), SKIP_REASONS.noCredit); // won't fix itself soon: skip in later runs too
-      throw new ProviderError(`${target.provider} has no credit: ${detail}`, "billing", res.status);
-    }
-    if (res.status === 429 && DAILY_LIMIT_TEXT.test(detail)) {
-      markProviderBusy(target, dailyLimitSkipMs(), SKIP_REASONS.dailyLimit);
-      throw new ProviderError(`${target.provider} daily limit reached: ${detail}`, "rate_limit", res.status, retryAfterMs, [], providerMessage(raw));
-    }
-    if (res.status === 429 || RATE_LIMIT_TEXT.test(detail)) {
-      throw new ProviderError(`${target.provider} rate limited: ${detail}`, "rate_limit", res.status, retryAfterMs);
-    }
-    const said = providerMessage(raw);
-    if (
-      res.status === 404 ||
-      res.status === 410 ||
-      ([400, 403, 422].includes(res.status) && MODEL_UNAVAILABLE_TEXT.test(detail))
-    ) {
-      throw new ProviderError(`${target.provider} model ${model} unavailable: ${detail}`, "model_unavailable", res.status, undefined, [], said);
-    }
-    if (res.status === 401 || res.status === 403 || (res.status === 400 && BAD_KEY_TEXT.test(detail))) {
-      markProviderBusy(target, keyRejectedSkipMs(), SKIP_REASONS.keyRejected);
-      throw new ProviderError(`${target.provider} auth failed: ${detail}`, "auth", res.status, undefined, [], said);
-    }
-    if (res.status === 503 || (res.status >= 500 && OVERLOAD_TEXT.test(detail))) {
-      throw new ProviderError(`${target.provider} model ${model} overloaded: ${detail}`, "overloaded", res.status, retryAfterMs);
-    }
-    if (res.status >= 500) {
-      throw new ProviderError(`${target.provider} server error: ${detail}`, "server", res.status, retryAfterMs, [], said);
-    }
-    throw new ProviderError(`${target.provider} rejected request: ${detail}`, "client", res.status, undefined, [], said);
-  }
-
-  let content: unknown;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-    content = (parsed as any)?.choices?.[0]?.message?.content;
-  } catch {
-    throw new ProviderError(`${target.provider} returned non-JSON body`, "bad_response", res.status);
-  }
-  if (typeof content !== "string" || content.trim() === "") {
-    throw new ProviderError(`${target.provider} returned empty completion`, "bad_response", res.status);
-  }
+function finishContent(target: ProviderTarget, status: number, messages: ChatMessage[], content: string, usageSource: unknown) {
+  if (content.trim() === "") throw new ProviderError(`${target.provider} returned empty completion`, "bad_response", status);
   // Reasoning models (e.g. some NIM-hosted ones) prepend <think>…</think>; it's not part of the artifact.
   const cleaned = content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, "");
-  return { content: cleaned || content, usage: readUsage(parsed, messages, content) };
+  return { content: cleaned || content, usage: readUsage(usageSource, messages, content) };
 }

@@ -23,7 +23,9 @@ test("rankModels: drops non-chat models, follows hints, newest version first", (
   const hints = [/^gemini-[\d.]+-flash$/, /^gemini-[\d.]+-flash-lite$/, /^gemini-.*pro/];
   assert.deepEqual(rankModels(ids, hints, new Set()), ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.8-flash-lite"]);
   assert.deepEqual(rankModels(ids, hints, new Set(["gemini-3.8-flash"])), ["gemini-3.5-flash", "gemini-3.8-flash-lite", "gemini-3.5-pro"]);
-  assert.deepEqual(rankModels(["whisper-large-v3", "llama-guard-4", "nv-embed-v2", "some-chat-model"], ["coder"], new Set()), ["some-chat-model"]);
+  // Models matching no preference are never picked (unknown models tend to hang or misbehave).
+  assert.deepEqual(rankModels(["whisper-large-v3", "llama-guard-4", "nv-embed-v2", "some-chat-model"], ["coder"], new Set()), []);
+  assert.deepEqual(rankModels(["recursive/flint-v1.0:free", "qwen/qwen9-coder:free"], ["coder"], new Set()), ["qwen/qwen9-coder:free"]);
 });
 
 test("Groq 400 'decommissioned' is recognised as a retired model and the next model is used", async () => {

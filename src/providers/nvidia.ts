@@ -32,6 +32,7 @@ export function nvidiaTarget(apiKey: string, taskType: TaskType): ProviderTarget
     // Not every NIM model accepts response_format; the planner prompt already demands JSON
     // and the plan parser tolerates prose around it.
     supportsJsonMode: false,
+    streamUsage: false, // not every NIM accepts stream_options; tokens are estimated instead
     // Discovery only considers chat/instruct models: NVIDIA also lists code-completion
     // models (e.g. starcoder2) that its chat endpoint answers with 404.
     modelFilter: /instruct|chat|kimi|deepseek|qwen3|gpt-oss|nemotron|mistral|mixtral|llama-4/i,

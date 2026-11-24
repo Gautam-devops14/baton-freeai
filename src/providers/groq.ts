@@ -36,7 +36,7 @@ export function groqTarget(apiKey: string, taskType: TaskType): ProviderTarget {
     apiKey,
     modelHints:
       taskType === "code"
-        ? ["coder", "gpt-oss-120b", "llama-3.3-70b", "kimi", "70b", "qwen", "gpt-oss"]
-        : ["llama-3.3-70b", "gpt-oss-120b", "kimi", "70b", "qwen", "gpt-oss"],
+        ? ["coder", "gpt-oss-120b", "llama-3.3-70b", "kimi", "llama-4", "70b", "qwen", "gpt-oss", "instruct"]
+        : ["llama-3.3-70b", "gpt-oss-120b", "kimi", "llama-4", "70b", "qwen", "gpt-oss", "instruct"],
   };
 }

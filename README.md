@@ -38,7 +38,7 @@ Click **Continue this project** on any run with files, then type what to change 
 
 ## OpenRouter
 
-One key (from openrouter.ai/keys) gives access to many models. Baton only ever uses the **free** ones (IDs ending in `:free`), including when it discovers replacements, so it never spends credits. Free use is capped at about 50 requests a day: when OpenRouter reports that daily cap, Baton skips it for an hour (`BATON_DAILY_LIMIT_SKIP_MS`) instead of retrying every run. Models: `OPENROUTER_CODE_MODELS` / `OPENROUTER_GENERAL_MODELS`.
+One key (from openrouter.ai/keys) gives access to many models. Baton uses **`openrouter/free`**, OpenRouter's own router, which always sends the request to a model that is free right now. That matters because individual `:free` models get withdrawn (they then answer 404 "use the paid slug instead"; Baton never follows that). If the router fails, discovery only considers `:free` models, so Baton never spends credits. Free use is capped at about 50 requests a day: when OpenRouter reports that daily cap, Baton skips it for an hour (`BATON_DAILY_LIMIT_SKIP_MS`) instead of retrying every run. Models: `OPENROUTER_CODE_MODELS` / `OPENROUTER_GENERAL_MODELS`.
 
 ## Text files only
 
@@ -58,9 +58,22 @@ This is the core of Baton: context lives in the shared workspace, not in any mod
 
 **Settings → Test keys** checks each key with a free request (the provider's model list, or OpenRouter's key-info endpoint), so it spends no tokens. For each provider you get whether the key was accepted (or the exact error) and which of Baton's configured models that account can actually use. API: `POST /api/keys/test` with `{"keys": {...}}`.
 
+## Streaming and timeouts
+
+Every provider call streams its reply (`stream: true`, with `stream_options.include_usage` where supported, so token counts come from the final chunk). That lets timeouts tell "slow but working" apart from "stuck":
+
+* no first chunk within `BATON_PROVIDER_TIMEOUT_MS` (30s), or `BATON_DISCOVERED_TIMEOUT_MS` (15s) for models found by discovery → timeout
+* a gap longer than `BATON_STREAM_IDLE_TIMEOUT_MS` (20s) in the middle of a reply → timeout
+* longer than `BATON_MAX_CALL_MS` (180s) overall → timeout
+
+A model that is still writing a long file is never cut off at 30s. While a reply streams, the chat shows "… is writing… N chars received". Errors sent in the middle of a stream are classified like HTTP errors. Servers that reject `stream_options` are retried once without it, and servers that answer with plain JSON still work.
+
 ## Waiting out short rate limits
 
-If every provider fails a file but one was only briefly rate limited (e.g. Groq's per-minute token cap, which tells you "try again in 7.6s"), Baton waits for that reset and retries, up to `BATON_MAX_RATE_WAIT_MS` (default 20s), instead of giving up on the file. Partial runs also get a **Retry missing files** button.
+* If a provider's rate limit resets within `BATON_SHORT_RATE_WAIT_MS` (8s), e.g. Groq's "Please try again in 2s", Baton waits and retries it right away instead of detouring through slower providers.
+* For longer limits:
+
+  if every provider fails a file but one was only briefly rate limited, Baton waits for that reset and retries, up to `BATON_MAX_RATE_WAIT_MS` (20s), instead of giving up on the file. Partial runs also get a **Retry missing files** button.
 
 ## Memory between runs
 

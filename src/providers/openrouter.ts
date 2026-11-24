@@ -17,8 +17,11 @@ const list = (env: string | undefined, fallback: string[]) => {
  * Override with OPENROUTER_CODE_MODELS / OPENROUTER_GENERAL_MODELS.
  */
 export const OPENROUTER_MODELS = {
-  code: list(process.env.OPENROUTER_CODE_MODELS, ["qwen/qwen3-coder:free", "deepseek/deepseek-chat-v3-0324:free", "meta-llama/llama-3.3-70b-instruct:free"]),
-  general: list(process.env.OPENROUTER_GENERAL_MODELS, ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat-v3-0324:free"]),
+  // "openrouter/free" is OpenRouter's own router: it always sends the request to a
+  // model that is free right now, so it survives the free catalogue changing
+  // (fixed ":free" IDs like qwen3-coder:free were withdrawn).
+  code: list(process.env.OPENROUTER_CODE_MODELS, ["openrouter/free"]),
+  general: list(process.env.OPENROUTER_GENERAL_MODELS, ["openrouter/free"]),
 };
 
 export function openrouterTarget(apiKey: string, taskType: TaskType): ProviderTarget {

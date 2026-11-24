@@ -42,7 +42,10 @@ export interface RunUsage {
 
 /** One HTTP call to a provider (debug view). "start" is emitted live; "end" is stored. */
 export interface CallTrace {
-  phase: "start" | "end";
+  /** "start" and "progress" are streamed live; only "end" is stored. */
+  phase: "start" | "progress" | "end";
+  /** Characters of reply received so far ("progress" events). */
+  chars?: number;
   at: string;
   provider: string;
   model: string;
@@ -219,6 +222,8 @@ export interface ProviderTarget {
   unavailableModels?: Set<string>;
   /** False for providers/models that reject a custom temperature (e.g. OpenAI GPT-5). Default true. */
   sendTemperature?: boolean;
+  /** False for providers that don't support stream_options.include_usage (tokens are then estimated). */
+  streamUsage?: boolean;
   /** False for providers/models that reject `response_format: json_object`. Default true. */
   supportsJsonMode?: boolean;
   /** Preference order used to pick a model from the provider's live list when all configured models are retired. */
