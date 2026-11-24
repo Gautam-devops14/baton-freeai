@@ -6,10 +6,14 @@ A stateful relay orchestrator for free-tier LLM endpoints. Baton plans a project
 
 ```bash
 npm install
-npm run dev          # tsx watch, http://localhost:3000
+npm run dev          # open http://localhost:3000 for the web UI
 npm test             # 22 tests, providers stubbed: no keys needed
 npm run build && npm start
 ```
+
+## Web UI
+
+Open http://localhost:3000, paste your Groq and/or Gemini key, describe a project and click **Run**. You'll see the relay log, each generated file, and a .zip download link. Keys are only stored in your browser if you tick "Remember keys".
 
 ## API
 

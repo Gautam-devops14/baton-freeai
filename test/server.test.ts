@@ -129,3 +129,10 @@ test("planning failure on all providers -> 502", async () => {
   assert.equal(res.statusCode, 502);
   assert.equal(res.json().error, "planning_failed");
 });
+
+test("GET / serves the web UI", async () => {
+  const res = await buildServer().inject({ method: "GET", url: "/" });
+  assert.equal(res.statusCode, 200);
+  assert.match(String(res.headers["content-type"]), /text\/html/);
+  assert.match(res.body, /<title>Baton<\/title>/);
+});

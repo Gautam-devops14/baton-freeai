@@ -7,6 +7,7 @@ import { MissingKeysError, orchestrate } from "./services/orchestrator.js";
 import { PlanningError } from "./services/planner.js";
 import { InMemoryWorkspaceStore, type WorkspaceStore } from "./services/storage.js";
 import type { OrchestrateRequest } from "./types.js";
+import { UI_HTML } from "./ui.js";
 
 const orchestrateSchema = {
   body: {
@@ -38,6 +39,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   // Requests carry user API keys: keep logging to method/url/status only.
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 256 * 1024 });
 
+  app.get("/", async (_req, reply) => reply.type("text/html; charset=utf-8").send(UI_HTML));
   app.get("/health", async () => ({ status: "ok" }));
 
   app.post<{ Body: OrchestrateRequest }>("/api/orchestrate", { schema: orchestrateSchema }, async (req, reply) => {
