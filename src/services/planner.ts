@@ -31,7 +31,10 @@ const firstString = (o: Record<string, unknown>, keys: string[]) =>
   keys.map((k) => o[k]).find((v): v is string => typeof v === "string" && v.trim() !== "");
 
 const TASK_TYPE_GUIDANCE: Record<BatonWorkspace["taskType"], string> = {
-  code: 'Artifacts are source files with relative paths (e.g. "package.json", "src/auth.js"). Decide "primaryLanguage" and "framework".',
+  code:
+    'Artifacts are source files with relative paths (e.g. "package.json", "src/auth.js"). Decide "primaryLanguage" and "framework". ' +
+    "Build something that actually runs (e.g. HTML/CSS/JS that opens in a browser, or a server that starts), not requirements, " +
+    "architecture or API documents, unless the user explicitly asks for documents.",
   document: 'Artifacts are Markdown chapters (e.g. "overview.md", "methodology.md"). Decide "tone" and "audience".',
   analysis:
     'Artifacts are analysis deliverables such as "data/sample.csv", "analysis.py", or "findings.md". Decide "primaryLanguage" and "methodology".',
@@ -43,13 +46,20 @@ export function buildPlannerMessages(ws: BatonWorkspace): ChatMessage[] {
       role: "system",
       content: [
         "You are the Task Architect for Baton, a multi-model build relay.",
-        `Decompose the user's objective into ${MIN_TASKS} to ${MAX_TASKS} atomic artifacts. Each task produces exactly ONE artifact.`,
+        "FIRST decide what the user wants:",
+        '- If the message is a question, asks for information or an opinion, or asks "can you...?" without asking you to actually ' +
+          'do it now, do NOT plan any files. Reply with ONLY {"answer": "<your reply>"}. Follow any requested format exactly ' +
+          '(e.g. "yes or no only" -> {"answer": "Yes."}). Match the length to the question: short for simple questions, ' +
+          'a full, clear explanation (Markdown allowed) when asked to explain code or concepts. ' +
+          'For follow-ups you can see the project files, so you can explain them.',
+        "- Only if the user asks you to create, build, write, fix or change something, plan files as described below.",
+        `When planning, decompose the user's objective into ${MIN_TASKS} to ${MAX_TASKS} atomic artifacts. Each task produces exactly ONE artifact.`,
         TASK_TYPE_GUIDANCE[ws.taskType],
         "Every artifact must be a plain-text file (source code, HTML, CSS, JSON, Markdown, CSV, SVG...). " +
           "Never plan binary files such as .png, .jpg, .gif, .ico, .pdf, .zip or fonts: a text model cannot produce them. " +
           "Draw logos, icons and illustrations as SVG (a .svg file or inline <svg> in HTML).",
         "Order tasks so that dependencies come before the artifacts that consume them.",
-        "Respond with ONLY a JSON object, no prose, matching:",
+        "Respond with ONLY a JSON object, no prose: either {\"answer\": \"...\"} or",
         '{"decisions": {"<key>": "<string value>", ...}, "tasks": [{"title": "<what to build>", "targetArtifact": "<relative path>"}]}',
       ].join("\n"),
     },
@@ -81,7 +91,8 @@ function plannerUserMessage(ws: BatonWorkspace): string {
   const { included, listed } = existingFilesForPlanner(ws);
   return [
     `Task type: ${ws.taskType}`,
-    "This is a FOLLOW-UP to an existing project. Change the existing files to satisfy the new request.",
+    "This is a FOLLOW-UP to an existing project. If the new request asks for changes, change the existing files to satisfy it. " +
+      'If it is only a question (about the project or anything else), answer it with {"answer": "..."} and plan no files.',
     `## Earlier requests (oldest first)\n${(ws.conversation ?? []).map((p, i) => `${i + 1}. ${p}`).join("\n")}`,
     `## New request\n${ws.userPrompt}`,
     `## Existing project files\n${files.map((f) => `- ${f}`).join("\n")}`,
@@ -112,6 +123,8 @@ function extractJson(text: string): unknown {
 export interface ParsedPlan {
   metadata: BatonWorkspace["metadata"];
   tasks: BatonTask[];
+  /** Set when the message was a question: the reply, and no tasks. */
+  answer?: string;
 }
 
 export function parsePlan(text: string): ParsedPlan {
@@ -128,6 +141,9 @@ export function parsePlan(text: string): ParsedPlan {
     }
   }
 
+  // A question gets an answer, not a build.
+  const answer = typeof data.answer === "string" ? data.answer.trim() : "";
+  if (answer && !(rawTasks && rawTasks.length)) return { metadata: {}, tasks: [], answer };
   if (!rawTasks) throw new Error("planner reply has no tasks array");
   const seen = new Set<string>();
   const tasks: BatonTask[] = [];
@@ -181,6 +197,11 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
       logModelSwaps(ws, 0, target.provider, result.skippedModels);
       const plan = parsePlan(result.content);
       attachBreakdown(ws, 0, result.model, { understanding: result.usage.totalTokens });
+      if (plan.answer !== undefined) {
+        ws.answer = plan.answer;
+        log(ws, 0, "plan", { ...target, model: result.model }, "Answered the question directly (no files needed)", result.usage);
+        return;
+      }
       ws.metadata = { ...ws.metadata, ...plan.metadata };
       ws.tasks = plan.tasks;
       ws.emit?.({ type: "plan", tasks: plan.tasks.map((t) => ({ id: t.id, targetArtifact: t.targetArtifact, title: t.title })) });

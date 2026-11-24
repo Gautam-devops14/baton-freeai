@@ -229,6 +229,40 @@ export async function orchestrate(
     // Stage 2 — planning (Gemini as architect, Groq as safety net).
     await planWorkspace(ws, targets.planner);
 
+    // A question: the planner already answered it. Nothing to build.
+    if (ws.answer !== undefined) {
+      const usage = sumUsage(ws.executionLogs);
+      const summary = { totalTasks: 0, completedTasks: 0, artifactsGenerated: [] as string[] };
+      const historyId = await record({
+        id: ws.workspaceId,
+        status: "answered",
+        message: ws.answer,
+        summary,
+        usage,
+        ...runFields(),
+        executionLogs: ws.executionLogs,
+        artifacts: {}, // an answer changes no files; the project stays as it was
+      });
+      emit?.({ type: "done", status: "answered", historyId, message: ws.answer });
+      return {
+        status: "answered",
+        answer: ws.answer,
+        workspaceId: ws.workspaceId,
+        historyId,
+        taskType: ws.taskType,
+        summary,
+        artifacts: {},
+        executionLogs: ws.executionLogs,
+        usage,
+        parentId: ws.parentId,
+        chatId: ws.chatId,
+        calls: ws.calls,
+        contexts: ws.contexts,
+        breakdown: sumBreakdown(ws.calls),
+        downloadUrl: "",
+      };
+    }
+
     // Stage 3 — relay execution with failover.
     const allDone = await runRelay(ws, { targets: targets.relay });
 

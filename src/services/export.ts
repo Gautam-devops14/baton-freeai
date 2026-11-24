@@ -94,6 +94,7 @@ function runSection(rec: HistoryRecord, n: number): string {
     out.push(`Answered locally without calling any AI: ${rec.message ?? ""}`, "");
     return out.join("\n");
   }
+  if (rec.status === "answered") out.push("**Answer** (a question, so no files were built):", "", quote(rec.message ?? ""), "");
   if (rec.status === "error" && rec.message) out.push("**Error:**", "", quote(rec.message), "");
 
   // Where the tokens went

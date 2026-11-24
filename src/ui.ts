@@ -96,7 +96,7 @@ export const UI_HTML = /* html */ `<!doctype html>
   .bot { flex: 1; min-width: 0; }
   .bot .line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .pill { border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; font-size: 12px; font-weight: 600; }
-  .pill.success { color: var(--ok); border-color: var(--ok); }
+  .pill.success, .pill.answered { color: var(--ok); border-color: var(--ok); }
   .pill.partial, .pill.failed, .pill.error { color: var(--warn); border-color: var(--warn); }
   .pill.running { color: var(--accent); border-color: var(--accent); }
   .bot .text { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -326,7 +326,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     return new Date(iso).toLocaleDateString();
   }
   const PROVIDER_LABEL = { groq: "Groq", google: "Gemini", nvidia: "NVIDIA NIM", openrouter: "OpenRouter", openai: "OpenAI", baton: "Baton" };
-  const STATUS_TEXT = { success: "Done", partial: "Partly done", failed: "Failed", error: "Error", gated: "Answered locally" };
+  const STATUS_TEXT = { success: "Done", partial: "Partly done", failed: "Failed", error: "Error", gated: "Answered locally", answered: "Answer" };
 
   // ===================== API keys (Settings) =====================
   const KEY_FIELDS = [
@@ -621,7 +621,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     const files = Object.keys(rec.artifacts || {});
     const ch = rec.changes;
     const line = el("div", { className: "line" }, el("span", { className: "pill " + rec.status, textContent: STATUS_TEXT[rec.status] || rec.status }));
-    if (rec.status === "gated") {
+    if (rec.status === "gated" || rec.status === "answered") {
       body.append(line, el("div", { className: "text", textContent: rec.message || "" }));
     } else if (rec.status === "error") {
       body.append(line, el("div", { className: "errbox", textContent: rec.message || "Something went wrong." }));
@@ -763,6 +763,7 @@ export const UI_HTML = /* html */ `<!doctype html>
         } else if (e.type === "log") {
           const l = e.entry;
           if (l.event === "execute") add("✓", "ok", "Wrote " + l.message.replace("Generated ", "").replace(" successfully", ""));
+          else if (l.event === "plan" && l.message.indexOf("Answered") === 0) add("✓", "ok", "It's a question: answering directly, no files");
           else if (l.event === "failover" && l.message.indexOf("skipped:") === 0) add("↷", "dim", "Skipped " + (PROVIDER_LABEL[l.provider] || l.provider) + ": " + l.message.split(": ").slice(2).join(": "));
           else if (l.event === "failover" && l.message.indexOf("waiting ") === 0) add("⏱", "wait", (PROVIDER_LABEL[l.provider] || l.provider) + ": " + l.message);
           else if (l.event === "failover" && l.message.indexOf("passing") >= 0) add("→", "dim", l.message.slice(l.message.indexOf(";") + 2));

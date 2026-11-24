@@ -159,6 +159,8 @@ export interface BatonWorkspace {
   calls?: CallTrace[];
   /** Chat (conversation thread) this run belongs to. */
   chatId?: string;
+  /** Set when the message was a question the planner answered directly (no build). */
+  answer?: string;
   /** Live progress sink (not persisted). */
   emit?: (event: ProgressEvent) => void;
   metadata: {
@@ -205,7 +207,9 @@ export interface OrchestrateRequest {
 }
 
 export interface OrchestrateResponse {
-  status: "success" | "partial" | "failed";
+  /** "answered": the message was a question; see `answer`. No files were built. */
+  status: "success" | "partial" | "failed" | "answered";
+  answer?: string;
   workspaceId: string;
   /** Id of this run in the history store (same as workspaceId), if history is enabled. */
   historyId?: string;
