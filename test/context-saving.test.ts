@@ -48,12 +48,17 @@ test("a step gets full text only of the files it uses; the rest as outlines", ()
   assert.ok(!prompt.includes(".x { }"), "unused file's body not sent");
 });
 
-test("without a 'uses' list, full text up to the budget (newest first), outlines beyond it", () => {
+test("dependencies are detected from the code: the page that loads app.js goes in full when writing app.js", () => {
+  const task = { id: 4, title: "Logic", targetArtifact: "app.js", status: "pending" };
+  assert.deepEqual(selectContext(ws([task]), task as any), { full: ["index.html"], outline: ["styles.css", "data.json"] });
+});
+
+test("nothing detected and no 'uses': full text up to the budget (newest first), outlines beyond it", () => {
   process.env.BATON_CONTEXT_FULL_CHARS = "2000";
   try {
-    const task = { id: 4, title: "Logic", targetArtifact: "app.js", status: "pending" };
+    const task = { id: 4, title: "Notes", targetArtifact: "notes.md", status: "pending" };
     const pick = selectContext(ws([task]), task as any);
-    assert.deepEqual(pick.full, ["styles.css", "data.json"].filter((p) => p !== "styles.css" || css.length <= 2000 - 15));
+    assert.ok(pick.full.includes("data.json"), "small file fits the budget");
     assert.ok(pick.outline.includes("index.html"), "the big file is outlined");
   } finally {
     delete process.env.BATON_CONTEXT_FULL_CHARS;

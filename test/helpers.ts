@@ -12,6 +12,8 @@ process.env.BATON_RELAY_ORDER ??= "groq,google,nvidia,openai";
 // Older tests rate-limit every provider on purpose; don't make them wait for the second chance.
 process.env.BATON_MAX_RATE_WAIT_MS ??= "0";
 process.env.BATON_SHORT_RATE_WAIT_MS ??= "0";
+// The pacer has its own tests; keep it out of tests that make many quick Groq calls.
+process.env.BATON_TPM_LIMITS ??= "none=0";
 
 // Fake OpenAI-compatible provider backend for tests.
 export type Handler = (req: { url: string; model: string; body: any; signal?: AbortSignal }) => Promise<Response> | Response;

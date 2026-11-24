@@ -26,6 +26,7 @@ export function log(
 export function traceFor(ws: BatonWorkspace, step: number) {
   return {
     traceMeta: { runId: ws.workspaceId, step },
+    onWait: (_ms: number, message: string, provider: string, model: string) => log(ws, step, "failover", { provider, model }, message),
     onTrace: (call: CallTrace) => {
       if (call.phase === "end") (ws.calls ??= []).push(call);
       const { reply: _reply, ...light } = call; // the full reply is stored, not streamed

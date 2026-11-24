@@ -4,6 +4,7 @@
 import type { CallTrace, ChatMessage, ProviderTarget, TokenUsage } from "../types.js";
 import { listModels, rankModels } from "./discovery.js";
 import { rememberCall } from "./trace.js";
+import { outputReserve, pacerMaxWaitMs, pacerWait, recordTokens, tpmLimit } from "./pacer.js";
 import {
   clearProviderBusy,
   getDiscoveredModel,
@@ -101,6 +102,8 @@ export interface ChatOptions {
   idleTimeoutMs?: number;
   /** Internal: called while a reply streams in, with characters received so far. */
   onStreamProgress?: (chars: number) => void;
+  /** Called when Baton deliberately waits before a call (e.g. pacing under a tokens/minute cap). */
+  onWait?: (ms: number, message: string, provider: string, model: string) => void;
 }
 
 /** First-chunk timeout for models picked by discovery: unknown models get less patience. */
@@ -350,6 +353,16 @@ async function requestOnce(
     })(),
     ...opts.traceMeta,
   };
+  // Pace under the provider's tokens-per-minute cap instead of running into a 429.
+  const limit = tpmLimit(target.provider, model);
+  if (limit) {
+    const needed = estimateTokens(messages.map((m) => m.content).join("\n")) + outputReserve();
+    const wait = pacerWait(target, model, needed);
+    if (wait > 0 && wait <= pacerMaxWaitMs()) {
+      opts.onWait?.(wait, `pacing: waiting ${(wait / 1000).toFixed(1)}s to stay under ${target.provider}'s ${limit.toLocaleString("en-US")} tokens/min for ${model}`, target.provider, model);
+      await sleep(wait);
+    }
+  }
   const t0 = Date.now();
   opts.onTrace?.({ phase: "start", at: new Date(t0).toISOString(), ...base });
   const finish = (extra: Partial<CallTrace>) => {
@@ -362,6 +375,7 @@ async function requestOnce(
       ...opts,
       onStreamProgress: opts.onTrace ? (chars) => opts.onTrace!({ phase: "progress", at: new Date().toISOString(), ...base, chars }) : undefined,
     });
+    recordTokens(target, model, result.usage.totalTokens);
     // Keep exactly what the model said (before cleanup), so a run can be reviewed later.
     finish({ status: 200, outcome: "ok", tokens: result.usage, reply: clip(result.raw ?? result.content) });
     return { content: result.content, usage: result.usage, reasoningChars: result.reasoningChars };

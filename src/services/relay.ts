@@ -9,6 +9,7 @@ import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, 
 import { extractArtifactBody } from "./sanitize.js";
 import { outlineFile } from "./outline.js";
 import { applyEdits } from "./edits.js";
+import { directDependencies } from "./deps.js";
 import { estimateTokens } from "../providers/client.js";
 import { contextFile, originLabel, recordContext } from "./context.js";
 
@@ -147,15 +148,15 @@ const contextFullChars = () => Number(process.env.BATON_CONTEXT_FULL_CHARS ?? 12
 
 /**
  * Which shared files go in full and which as outlines, to keep context (and cost) down:
- *  - the plan lists what a file `uses` -> only those in full
- *  - no list -> full text, newest first, up to BATON_CONTEXT_FULL_CHARS; the rest as outlines
+ *  - direct dependencies (planner "uses" + imports/requires/src/href detected in the code,
+ *    files that reference the target, package.json for JS) -> in full
+ *  - everything else -> outline
+ *  - nothing detected -> full text, newest first, up to BATON_CONTEXT_FULL_CHARS; the rest as outlines
  */
 export function selectContext(ws: BatonWorkspace, task: BatonTask): { full: string[]; outline: string[] } {
   const all = sharedFiles(ws, task);
-  if (task.uses?.length) {
-    const wanted = new Set(task.uses);
-    return { full: all.filter((p) => wanted.has(p)), outline: all.filter((p) => !wanted.has(p)) };
-  }
+  const deps = new Set(directDependencies(task.targetArtifact, ws.artifacts, task.uses ?? []));
+  if (deps.size) return { full: all.filter((p) => deps.has(p)), outline: all.filter((p) => !deps.has(p)) };
   const order = [...all].reverse(); // most recently written first
   const full: string[] = [];
   let budget = contextFullChars();
