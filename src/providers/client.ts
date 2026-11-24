@@ -8,6 +8,7 @@ export const DEFAULT_TIMEOUT_MS = Number(process.env.BATON_PROVIDER_TIMEOUT_MS ?
 export type ProviderErrorKind =
   | "model_unavailable"
   | "overloaded"
+  | "billing"
   | "rate_limit"
   | "timeout"
   | "network"
@@ -41,6 +42,8 @@ export class ProviderError extends Error {
         return `HTTP ${this.status ?? 404} model unavailable`;
       case "overloaded":
         return `HTTP ${this.status ?? 503} model overloaded`;
+      case "billing":
+        return `HTTP ${this.status ?? 429} account has no credit (insufficient_quota)`;
       case "network":
         return "network error";
       case "auth":
@@ -76,6 +79,10 @@ function overloadRetryDelayMs(): number {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const RATE_LIMIT_TEXT = /rate.?limit|quota|too many requests|resource.?exhausted/i;
+/** Google answers a bad key with HTTP 400 "API key not valid", not 401. */
+const BAD_KEY_TEXT = /api[ _-]?key not valid|invalid api[ _-]?key|incorrect api key|API_KEY_INVALID/i;
+/** OpenAI answers 429 + insufficient_quota when the account has no credit: not temporary. */
+const BILLING_TEXT = /insufficient_quota|check your plan and billing|billing details|credit balance is too low/i;
 const OVERLOAD_TEXT = /high demand|overloaded|"UNAVAILABLE"|try again later/i;
 
 function parseRetryAfter(header: string | null): number | undefined {
@@ -215,13 +222,16 @@ async function requestOnce(
   if (!res.ok) {
     const detail = raw.slice(0, 300);
     const retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
+    if ((res.status === 429 || res.status === 402) && BILLING_TEXT.test(detail)) {
+      throw new ProviderError(`${target.provider} has no credit: ${detail}`, "billing", res.status);
+    }
     if (res.status === 429 || RATE_LIMIT_TEXT.test(detail)) {
       throw new ProviderError(`${target.provider} rate limited: ${detail}`, "rate_limit", res.status, retryAfterMs);
     }
     if (res.status === 404 || ((res.status === 400 || res.status === 410) && MODEL_UNAVAILABLE_TEXT.test(detail))) {
       throw new ProviderError(`${target.provider} model ${model} unavailable: ${detail}`, "model_unavailable", res.status);
     }
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401 || res.status === 403 || (res.status === 400 && BAD_KEY_TEXT.test(detail))) {
       throw new ProviderError(`${target.provider} auth failed: ${detail}`, "auth", res.status);
     }
     if (res.status === 503 || (res.status >= 500 && OVERLOAD_TEXT.test(detail))) {

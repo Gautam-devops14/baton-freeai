@@ -55,6 +55,8 @@ export interface OrchestrateRequest {
 export interface OrchestrateResponse {
   status: "success" | "partial" | "failed";
   workspaceId: string;
+  /** Id of this run in the history store (same as workspaceId), if history is enabled. */
+  historyId?: string;
   taskType: TaskType;
   summary: {
     totalTasks: number;
@@ -71,6 +73,7 @@ export interface GatedResponse {
   kind: "chit_chat" | "command";
   match: string;
   response: string;
+  historyId?: string;
 }
 
 // ---- Provider layer ----

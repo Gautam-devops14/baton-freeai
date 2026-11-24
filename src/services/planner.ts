@@ -7,8 +7,16 @@ import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../
 import { safeArtifactPath } from "./paths.js";
 import { log, logModelSwaps } from "./logging.js";
 
+/** We ask for 2-4 tasks (spec), but accept a 1-task plan rather than failing a small request. */
 export const MIN_TASKS = 2;
 export const MAX_TASKS = 4;
+export const MIN_ACCEPTED_TASKS = 1;
+
+const PATH_KEYS = ["targetArtifact", "target_artifact", "artifact", "file", "filename", "fileName", "filePath", "file_path", "path", "target"];
+const TITLE_KEYS = ["title", "name", "task", "description", "summary", "goal"];
+
+const firstString = (o: Record<string, unknown>, keys: string[]) =>
+  keys.map((k) => o[k]).find((v): v is string => typeof v === "string" && v.trim() !== "");
 
 const TASK_TYPE_GUIDANCE: Record<BatonWorkspace["taskType"], string> = {
   code: 'Artifacts are source files with relative paths (e.g. "package.json", "src/auth.js"). Decide "primaryLanguage" and "framework".',
@@ -34,12 +42,15 @@ export function buildPlannerMessages(ws: BatonWorkspace): ChatMessage[] {
   ];
 }
 
-/** Pull the first JSON object out of a reply, tolerating fences or stray prose. */
+/** Pull the first JSON object (or array) out of a reply, tolerating fences or stray prose. */
 function extractJson(text: string): unknown {
   const fenced = /```(?:json)?\s*\n([\s\S]*?)\n```/i.exec(text);
   const candidate = fenced ? fenced[1] : text;
-  const start = candidate.indexOf("{");
-  const end = candidate.lastIndexOf("}");
+  const obj = candidate.indexOf("{");
+  const arr = candidate.indexOf("[");
+  const [open, close] = arr !== -1 && (obj === -1 || arr < obj) ? ["[", "]"] : ["{", "}"];
+  const start = candidate.indexOf(open);
+  const end = candidate.lastIndexOf(close);
   if (start === -1 || end <= start) throw new Error("no JSON object in planner reply");
   return JSON.parse(candidate.slice(start, end + 1));
 }
@@ -50,29 +61,36 @@ export interface ParsedPlan {
 }
 
 export function parsePlan(text: string): ParsedPlan {
-  const data = extractJson(text) as { decisions?: unknown; tasks?: unknown };
+  const parsed = extractJson(text) as Record<string, unknown> | unknown[];
+  // Models don't always follow the schema exactly: accept a bare array, or tasks under a near-miss key.
+  const data = (Array.isArray(parsed) ? { tasks: parsed } : parsed) as Record<string, unknown>;
+  const rawTasks = ["tasks", "milestones", "steps", "artifacts", "files", "plan"].map((k) => data[k]).find(Array.isArray);
+  const decisions = data.decisions ?? data.architecture ?? data.metadata;
 
   const metadata: BatonWorkspace["metadata"] = {};
-  if (data.decisions && typeof data.decisions === "object") {
-    for (const [k, v] of Object.entries(data.decisions as Record<string, unknown>)) {
+  if (decisions && typeof decisions === "object") {
+    for (const [k, v] of Object.entries(decisions as Record<string, unknown>)) {
       if (["string", "number", "boolean"].includes(typeof v)) metadata[k] = v as string | number | boolean;
     }
   }
 
-  if (!Array.isArray(data.tasks)) throw new Error("planner reply has no tasks array");
+  if (!rawTasks) throw new Error("planner reply has no tasks array");
   const seen = new Set<string>();
   const tasks: BatonTask[] = [];
-  for (const raw of data.tasks) {
-    const t = raw as { title?: unknown; targetArtifact?: unknown };
-    if (typeof t?.title !== "string" || typeof t?.targetArtifact !== "string") continue;
-    const path = safeArtifactPath(t.targetArtifact);
+  for (const raw of rawTasks) {
+    if (!raw || typeof raw !== "object") continue;
+    const t = raw as Record<string, unknown>;
+    const rawPath = firstString(t, PATH_KEYS);
+    if (!rawPath) continue;
+    const path = safeArtifactPath(rawPath);
     if (!path || seen.has(path)) continue;
     seen.add(path);
-    tasks.push({ id: tasks.length + 1, title: t.title.trim(), targetArtifact: path, status: "pending" });
+    const title = firstString(t, TITLE_KEYS)?.trim() ?? `Write ${path}`;
+    tasks.push({ id: tasks.length + 1, title, targetArtifact: path, status: "pending" });
     if (tasks.length === MAX_TASKS) break;
   }
-  if (tasks.length < MIN_TASKS) {
-    throw new Error(`planner produced ${tasks.length} valid task(s); need at least ${MIN_TASKS}`);
+  if (tasks.length < MIN_ACCEPTED_TASKS) {
+    throw new Error("planner produced no usable tasks (each needs a file path)");
   }
   return { metadata, tasks };
 }
@@ -85,7 +103,7 @@ export function parsePlan(text: string): ParsedPlan {
 export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[]): Promise<void> {
   const messages = buildPlannerMessages(ws);
   let lastError: unknown;
-  const attempts: string[] = [];
+  const attempts: PlanAttempt[] = [];
 
   for (const [i, target] of targets.entries()) {
     try {
@@ -104,7 +122,7 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
       lastError = err;
       if (err instanceof ProviderError) logModelSwaps(ws, 0, target.provider, err.skippedModels);
       const reason = err instanceof ProviderError ? err.reason : `invalid plan (${(err as Error).message})`;
-      attempts.push(`${target.provider}: ${reason}`);
+      attempts.push({ provider: target.provider, kind: err instanceof ProviderError ? err.kind : "invalid_plan", reason });
       const next = targets[i + 1];
       log(
         ws,
@@ -118,23 +136,45 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
   throw new PlanningError(lastError, attempts, targets.length);
 }
 
-const HINTS: Partial<Record<string, string>> = {
-  overloaded: "the provider's servers are busy right now; this is usually temporary, so try again in a minute",
-  rate_limit: "your free-tier quota is used up for now; wait for it to reset",
-  auth: "check that the API key is correct",
-  model_unavailable: "the configured models are no longer offered; update GEMINI_MODELS",
+export interface PlanAttempt {
+  provider: string;
+  kind: string;
+  reason: string;
+}
+
+const PROVIDER_LABEL: Record<string, string> = { google: "Gemini", groq: "Groq", openai: "OpenAI" };
+
+const HINTS: Record<string, (provider: string) => string> = {
+  overloaded: (p) => `${p}'s servers are busy right now; this is usually temporary, so try again in a minute`,
+  rate_limit: (p) => `your ${p} free-tier quota is used up for now; wait for it to reset`,
+  billing: (p) =>
+    p === "OpenAI"
+      ? "your OpenAI account has no credit; add a payment method at platform.openai.com/settings/organization/billing"
+      : `your ${p} account has no credit`,
+  auth: (p) => `check that the ${p} API key is correct`,
+  model_unavailable: (p) => `${p} no longer offers the configured models; update the model list in your environment`,
+  invalid_plan: (p) => `${p} answered, but its plan wasn't usable; try again or rephrase the request`,
+  timeout: (p) => `${p} took too long to answer; try again`,
 };
 
 export class PlanningError extends Error {
   constructor(
     readonly cause: unknown,
-    readonly attempts: string[] = [],
-    providerCount = attempts.length,
+    readonly attempts: PlanAttempt[] = [],
+    readonly providerCount = attempts.length,
   ) {
-    const kind = cause instanceof ProviderError ? cause.kind : undefined;
-    const parts = [`Planning failed (${attempts.join("; ") || (cause as Error)?.message || cause}).`];
-    if (kind && HINTS[kind]) parts.push(`Likely cause: ${HINTS[kind]}.`);
-    if (providerCount === 1) parts.push("Tip: add a second provider key (Groq, Gemini or OpenAI) so Baton can switch providers when one is down.");
+    const label = (p: string) => PROVIDER_LABEL[p] ?? p;
+    const summary = attempts.map((a) => `${a.provider}: ${a.reason}`).join("; ") || String((cause as Error)?.message ?? cause);
+    const hints = attempts
+      .map((a) => HINTS[a.kind]?.(label(a.provider)))
+      .filter((h, i, all): h is string => Boolean(h) && all.indexOf(h) === i);
+    const parts = [`Planning failed (${summary}).`];
+    if (hints.length) parts.push(`What to do: ${hints.join("; ")}.`);
+    if (providerCount < 3) {
+      const used = new Set(attempts.map((a) => a.provider));
+      const missing = ["groq", "google", "openai"].filter((p) => !used.has(p)).map(label);
+      if (missing.length) parts.push(`Tip: adding a ${missing.join(" or ")} key gives Baton more providers to fall back on.`);
+    }
     super(parts.join(" "));
     this.name = "PlanningError";
   }

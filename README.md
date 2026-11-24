@@ -15,6 +15,15 @@ npm run build && npm start
 
 Open http://localhost:3000, paste your Groq, Gemini and/or OpenAI key, describe a project and click **Run**. You'll see the relay log, each generated file, and a .zip download link. Keys are only stored in your browser if you tick "Remember keys".
 
+## History
+
+Every prompt you send is saved, along with its result, relay log and generated files. That includes greetings, missing-key errors and failed runs. It's all in the **History** sidebar and survives page refreshes and server restarts. Click a run to see it again, re-download its files, reuse the prompt, or delete it.
+
+* Stored as one JSON file per run in `data/runs/` (`BATON_DATA_DIR`, git-ignored). The oldest runs are dropped after `BATON_HISTORY_MAX` (default 500).
+* **API keys are never stored.** Only the names of the providers used are recorded.
+* Anyone who can open the page can see the history. Keep the server on `localhost` or a network you trust.
+* API: `GET /api/history`, `GET /api/history/:id`, `DELETE /api/history/:id`, `DELETE /api/history`.
+
 ## API
 
 ### `POST /api/orchestrate`
@@ -67,6 +76,12 @@ import { buildServer } from "./src/index.js";
 import { RedisWorkspaceStore } from "./src/services/storage.js";
 buildServer({ store: new RedisWorkspaceStore(redisClient) });
 ```
+
+## Troubleshooting
+
+* **Open it at `http://localhost:3000`**, not your network IP (`http://192.168.x.x:3000`). Browsers treat plain-HTTP network addresses as insecure, so extensions such as Grammarly throw `crypto.randomUUID is not a function` and downloads show an "insecure connection" warning. Both are harmless, and neither comes from Baton.
+* **`openai: HTTP 429 account has no credit`**: the OpenAI account has no billing credit. Add a payment method, or leave the OpenAI key empty.
+* **`invalid plan`**: the model answered with a plan Baton couldn't use. Run again, or rephrase the request.
 
 ## Networking note
 

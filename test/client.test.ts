@@ -144,3 +144,17 @@ test("still overloaded after the retry pass: throws 'overloaded' after two passe
   await assert.rejects(chatCompletion(gemini(), [], { retryOverloaded: true }), (e: ProviderError) => e.kind === "overloaded");
   assert.equal(calls.length, 4);
 });
+
+test("OpenAI 429 insufficient_quota is classified as 'billing', not a temporary rate limit", async () => {
+  installFetch(() => new Response(JSON.stringify({ error: {
+    message: "You exceeded your current quota, please check your plan and billing details.",
+    type: "insufficient_quota", code: "insufficient_quota",
+  } }), { status: 429 }));
+  await assert.rejects(chatCompletion(target, []), (e: ProviderError) =>
+    e.kind === "billing" && e.reason === "HTTP 429 account has no credit (insufficient_quota)");
+});
+
+test("Google's HTTP 400 'API key not valid' is classified as an auth error", async () => {
+  installFetch(() => new Response('[{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}]', { status: 400 }));
+  await assert.rejects(chatCompletion(target, []), (e: ProviderError) => e.kind === "auth" && e.status === 400);
+});

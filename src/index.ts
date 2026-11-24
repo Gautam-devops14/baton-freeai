@@ -3,7 +3,8 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
 import { createArtifactZip } from "./services/bundler.js";
-import { MissingKeysError, orchestrate } from "./services/orchestrator.js";
+import { FileHistoryStore, HISTORY_ID_RE, type HistoryStore } from "./services/history.js";
+import { MissingKeysError, orchestrate, type OrchestrationErrorInfo } from "./services/orchestrator.js";
 import { PlanningError } from "./services/planner.js";
 import { InMemoryWorkspaceStore, type WorkspaceStore } from "./services/storage.js";
 import type { OrchestrateRequest } from "./types.js";
@@ -32,11 +33,13 @@ const orchestrateSchema = {
 
 export interface ServerOptions {
   store?: WorkspaceStore;
+  history?: HistoryStore;
   logger?: boolean;
 }
 
 export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   const store = opts.store ?? new InMemoryWorkspaceStore();
+  const history = opts.history ?? new FileHistoryStore(process.env.BATON_DATA_DIR ?? "data");
   // Requests carry user API keys: keep logging to method/url/status only.
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 256 * 1024 });
 
@@ -45,28 +48,57 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
 
   app.post<{ Body: OrchestrateRequest }>("/api/orchestrate", { schema: orchestrateSchema }, async (req, reply) => {
     try {
-      return await orchestrate({ ...req.body, keys: req.body.keys ?? {} }, store);
+      return await orchestrate({ ...req.body, keys: req.body.keys ?? {} }, store, history);
     } catch (err) {
+      const info = err as OrchestrationErrorInfo;
+      const extra = { historyId: info.historyId, executionLogs: info.executionLogs ?? [] };
       if (err instanceof MissingKeysError) {
-        return reply.code(400).send({ status: "error", error: "missing_keys", message: err.message });
+        return reply.code(400).send({ status: "error", error: "missing_keys", message: err.message, ...extra });
       }
       if (err instanceof PlanningError) {
-        return reply.code(502).send({ status: "error", error: "planning_failed", message: err.message });
+        return reply.code(502).send({ status: "error", error: "planning_failed", message: err.message, ...extra });
       }
       throw err;
     }
   });
 
+  // ---- History: every prompt and its outcome, persisted on disk ----
+
+  app.get<{ Querystring: { limit?: string } }>("/api/history", async (req) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+    return { runs: await history.list(limit) };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/history/:id", async (req, reply) => {
+    const rec = await history.get(req.params.id);
+    if (!rec) return reply.code(404).send({ status: "error", error: "not_found", message: "No such run in history." });
+    return { ...rec, downloadUrl: Object.keys(rec.artifacts).length ? `/api/download/${rec.id}` : undefined };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/history/:id", async (req, reply) => {
+    const existed = await history.delete(req.params.id);
+    await store.delete(req.params.id);
+    return reply.code(existed ? 204 : 404).send();
+  });
+
+  app.delete("/api/history", async (_req, reply) => {
+    await history.clear();
+    return reply.code(204).send();
+  });
+
   app.get<{ Params: { workspaceId: string } }>("/api/download/:workspaceId", async (req, reply) => {
     const { workspaceId } = req.params;
-    const ws = /^ws_[\w]+$/.test(workspaceId) ? await store.get(workspaceId) : undefined;
-    if (!ws) {
+    // Live workspace first, then history (so downloads survive restarts and the 1h workspace TTL).
+    const artifacts = !HISTORY_ID_RE.test(workspaceId)
+      ? undefined
+      : ((await store.get(workspaceId))?.artifacts ?? (await history.get(workspaceId))?.artifacts);
+    if (!artifacts || Object.keys(artifacts).length === 0) {
       return reply.code(404).send({ status: "error", error: "not_found", message: "Workspace not found or expired." });
     }
     reply
       .header("Content-Type", "application/zip")
       .header("Content-Disposition", `attachment; filename="${workspaceId}.zip"`);
-    return reply.send(createArtifactZip(ws.artifacts));
+    return reply.send(createArtifactZip(artifacts));
   });
 
   return app;

@@ -32,7 +32,21 @@ test("rejects path traversal, absolute-path tricks and duplicates", () => {
   assert.deepEqual(p.tasks.map((t) => t.targetArtifact), ["src/a.js", "src/b.js"]);
 });
 
-test("rejects plans with fewer than two valid tasks", () => {
-  assert.throws(() => parsePlan(plan([{ title: "only", targetArtifact: "a.js" }])), /at least 2/);
+test("accepts a one-task plan instead of failing a small request", () => {
+  const p = parsePlan(plan([{ title: "only", targetArtifact: "index.html" }]));
+  assert.deepEqual(p.tasks.map((t) => t.targetArtifact), ["index.html"]);
+});
+
+test("tolerates schema near-misses: other key names, bare arrays, missing titles", () => {
+  const a = parsePlan(JSON.stringify({ architecture: { tone: "formal" }, files: [{ path: "a.md", description: "Intro" }, { filename: "b.md" }] }));
+  assert.equal(a.metadata.tone, "formal");
+  assert.deepEqual(a.tasks.map((t) => [t.targetArtifact, t.title]), [["a.md", "Intro"], ["b.md", "Write b.md"]]);
+  const b = parsePlan(JSON.stringify([{ name: "Server", file_path: "server.js" }]));
+  assert.deepEqual(b.tasks.map((t) => t.targetArtifact), ["server.js"]);
+});
+
+test("rejects plans with no usable tasks", () => {
+  assert.throws(() => parsePlan(plan([{ title: "no path here" }])), /no usable tasks/);
+  assert.throws(() => parsePlan(JSON.stringify({ decisions: {} })), /no tasks array/);
   assert.throws(() => parsePlan("not json"), /no JSON/);
 });

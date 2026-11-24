@@ -94,6 +94,9 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         logModelSwaps(ws, task.id, target.provider, pe.skippedModels);
         if (pe.kind === "rate_limit" || pe.kind === "server" || pe.kind === "overloaded") {
           cooldowns.set(keyOf(target), now() + (pe.retryAfterMs ?? DEFAULT_COOLDOWN_MS));
+        } else if (pe.kind === "billing" || pe.kind === "auth") {
+          // Won't fix itself mid-run: stop asking this provider for the rest of the request.
+          cooldowns.set(keyOf(target), Number.POSITIVE_INFINITY);
         }
         const next = candidates[i + 1];
         log(

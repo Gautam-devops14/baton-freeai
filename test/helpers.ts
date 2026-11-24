@@ -1,3 +1,10 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Keep test runs out of the real ./data history.
+process.env.BATON_DATA_DIR ??= mkdtempSync(join(tmpdir(), "baton-test-"));
+
 // Fake OpenAI-compatible provider backend for tests.
 export type Handler = (req: { url: string; model: string; body: any; signal?: AbortSignal }) => Promise<Response> | Response;
 
