@@ -96,3 +96,51 @@ test("a retired model is remembered on the target and skipped on later calls", a
   await chatCompletion(t, []);
   assert.deepEqual(calls.map((c) => c.model), ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash-lite"]);
 });
+
+// ---- Overloaded models (503 / "high demand") ----
+
+process.env.BATON_OVERLOAD_RETRY_MS = "0";
+const OVERLOADED_BODY = JSON.stringify([{
+  error: {
+    code: 503,
+    message: "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+    status: "UNAVAILABLE",
+  },
+}]);
+const busy = () => new Response(OVERLOADED_BODY, { status: 503 });
+
+test("503 'high demand' on the first model switches to the next model, and is not remembered", async () => {
+  let first = true;
+  installFetch(({ model }) => {
+    if (model === "gemini-3.8-flash" && first) return (first = false), busy();
+    return completion(model);
+  });
+  const t = gemini();
+  const r = await chatCompletion(t, []);
+  assert.equal(r.model, "gemini-3.5-flash-lite");
+  assert.equal(r.skippedModels[0].reason, "HTTP 503 model overloaded");
+  // Temporary: the next call goes back to the preferred model.
+  assert.equal((await chatCompletion(t, [])).model, "gemini-3.8-flash");
+});
+
+test("all models overloaded without retryOverloaded: throws 'overloaded' after one pass", async () => {
+  installFetch(() => busy());
+  await assert.rejects(chatCompletion(gemini(), []), (e: ProviderError) => e.kind === "overloaded" && e.status === 503);
+  assert.equal(calls.length, 2);
+});
+
+test("all models overloaded with retryOverloaded: one more pass after a pause", async () => {
+  let n = 0;
+  installFetch(() => (++n <= 2 ? busy() : completion("recovered")));
+  const r = await chatCompletion(gemini(), [], { retryOverloaded: true });
+  assert.equal(r.content, "recovered");
+  assert.deepEqual(calls.map((c) => c.model), ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"]);
+  assert.equal(r.skippedModels[1].next, "gemini-3.8-flash");
+  assert.equal(r.skippedModels[1].afterMs, 0);
+});
+
+test("still overloaded after the retry pass: throws 'overloaded' after two passes", async () => {
+  installFetch(() => busy());
+  await assert.rejects(chatCompletion(gemini(), [], { retryOverloaded: true }), (e: ProviderError) => e.kind === "overloaded");
+  assert.equal(calls.length, 4);
+});

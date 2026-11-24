@@ -185,3 +185,55 @@ test("all Gemini models retired: planning falls over to Groq only after both wer
   ]);
   assert.match(out.executionLogs[2].message, /HTTP 404 model unavailable; passing planning to groq/);
 });
+
+const OVERLOADED = () => new Response(
+  '[{"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}]',
+  { status: 503 },
+);
+
+test("Gemini overloaded with both keys: planner hands off to Groq at once, without waiting", async () => {
+  process.env.BATON_OVERLOAD_RETRY_MS = "5000"; // would make the test slow if we waited
+  try {
+    installFetch(({ url, body }) => (isGemini(url) ? OVERLOADED() : isPlanner(body) ? completion(PLAN) : completion("ok")));
+    const t0 = Date.now();
+    const out = (await buildServer().inject({
+      method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: KEYS },
+    })).json();
+    assert.ok(Date.now() - t0 < 2000, "no overload wait when another provider is available");
+    assert.equal(out.status, "success");
+    assert.equal(out.executionLogs.find((l: any) => l.event === "plan").provider, "groq");
+    assert.equal(calls.filter((c) => isGemini(c.url)).length, 2, "both Gemini models tried once");
+  } finally {
+    process.env.BATON_OVERLOAD_RETRY_MS = "0";
+  }
+});
+
+test("Gemini-only and overloaded: retries once, then a clear 502 with a hint", async () => {
+  process.env.BATON_OVERLOAD_RETRY_MS = "0";
+  installFetch(() => OVERLOADED());
+  const res = await buildServer().inject({
+    method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: { geminiApiKey: "AIza_test" } },
+  });
+  assert.equal(res.statusCode, 502);
+  const msg = res.json().message;
+  assert.match(msg, /google: HTTP 503 model overloaded/);
+  assert.match(msg, /servers are busy right now/);
+  assert.match(msg, /add both a Groq and a Gemini key/);
+  assert.equal(calls.length, 4, "2 models x 2 passes");
+});
+
+test("Gemini-only: overloaded first, recovers on the retry pass", async () => {
+  process.env.BATON_OVERLOAD_RETRY_MS = "100";
+  let n = 0;
+  installFetch(({ body }) => (++n <= 2 ? OVERLOADED() : isPlanner(body) ? completion(PLAN) : completion("ok")));
+  const out = (await buildServer().inject({
+    method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: { geminiApiKey: "AIza_test" } },
+  })).json();
+  assert.equal(out.status, "success");
+  assert.deepEqual(out.executionLogs.slice(0, 3).map((l: any) => l.message), [
+    "HTTP 503 model overloaded; retrying with gemini-3.5-flash-lite",
+    "HTTP 503 model overloaded; retrying with gemini-3.8-flash in 0.1s",
+    "Project decomposed into 3 milestones",
+  ]);
+  process.env.BATON_OVERLOAD_RETRY_MS = "0";
+});

@@ -7,6 +7,7 @@ export const DEFAULT_TIMEOUT_MS = Number(process.env.BATON_PROVIDER_TIMEOUT_MS ?
 
 export type ProviderErrorKind =
   | "model_unavailable"
+  | "overloaded"
   | "rate_limit"
   | "timeout"
   | "network"
@@ -38,6 +39,8 @@ export class ProviderError extends Error {
         return "socket timeout";
       case "model_unavailable":
         return `HTTP ${this.status ?? 404} model unavailable`;
+      case "overloaded":
+        return `HTTP ${this.status ?? 503} model overloaded`;
       case "network":
         return "network error";
       case "auth":
@@ -57,9 +60,23 @@ export interface ChatOptions {
   temperature?: number;
   maxTokens?: number;
   jsonMode?: boolean;
+  /**
+   * If every model is overloaded (503 / "high demand"), wait and try them once
+   * more before giving up. Callers enable this only for the LAST provider in a
+   * waterfall: with another provider available, switching beats waiting.
+   */
+  retryOverloaded?: boolean;
 }
 
+/** Read at call time so it can be tuned (or zeroed in tests) without a restart. */
+function overloadRetryDelayMs(): number {
+  return Number(process.env.BATON_OVERLOAD_RETRY_MS ?? 2000);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 const RATE_LIMIT_TEXT = /rate.?limit|quota|too many requests|resource.?exhausted/i;
+const OVERLOAD_TEXT = /high demand|overloaded|"UNAVAILABLE"|try again later/i;
 
 function parseRetryAfter(header: string | null): number | undefined {
   if (!header) return undefined;
@@ -78,23 +95,28 @@ export interface SkippedModel {
   reason: string;
   /** The model tried next, if any. */
   next?: string;
+  /** Delay before trying `next` (set when retrying overloaded models). */
+  afterMs?: number;
 }
 
 export interface ChatResult {
   content: string;
   /** The model that actually produced `content` (may be a fallback model). */
   model: string;
-  /** Models tried first and skipped because the provider no longer serves them. */
+  /** Models tried first and skipped (retired, or overloaded at the time). */
   skippedModels: SkippedModel[];
 }
 
 /**
  * Send a chat request, walking the target's model list: `target.model` first,
- * then each of `target.fallbackModels`. A model the provider reports as gone
- * (HTTP 404 or a "no longer available" message) is skipped in favour of the next
- * one and remembered on the target, so later calls in the same run go straight
- * to a working model. Any other error (429, timeout, auth...) is thrown
- * immediately so the relay can fail over to a different provider.
+ * then each of `target.fallbackModels`.
+ *  - Retired model (404 / "no longer available"): skip to the next model and
+ *    remember it on the target so later calls in this run don't retry it.
+ *  - Overloaded model (503 / "high demand"): skip to the next model, which
+ *    usually has separate capacity. Not remembered: the spike is temporary.
+ *    With `retryOverloaded`, overloaded models get one more pass after a pause.
+ *  - Anything else (429, timeout, auth...): throw at once so the relay can fail
+ *    over to a different provider.
  */
 export async function chatCompletion(
   target: ProviderTarget,
@@ -102,34 +124,48 @@ export async function chatCompletion(
   opts: ChatOptions = {},
 ): Promise<ChatResult> {
   const unavailable = (target.unavailableModels ??= new Set<string>());
-  const models = [target.model, ...(target.fallbackModels ?? [])].filter(
+  let candidates = [target.model, ...(target.fallbackModels ?? [])].filter(
     (m, i, all) => all.indexOf(m) === i && !unavailable.has(m),
   );
   const skippedModels: SkippedModel[] = [];
   let lastError: ProviderError | undefined;
+  const maxPasses = opts.retryOverloaded ? 2 : 1;
 
-  for (const [i, model] of models.entries()) {
-    try {
-      const content = await requestOnce(target, model, messages, opts);
-      return { content, model, skippedModels };
-    } catch (err) {
-      if (!(err instanceof ProviderError)) throw err;
-      if (err.kind !== "model_unavailable") {
-        // e.g. the fallback model is rate limited: surface it, but keep the swap history.
-        throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels);
+  for (let pass = 1; pass <= maxPasses && candidates.length > 0; pass++) {
+    const overloaded: string[] = [];
+    for (const [i, model] of candidates.entries()) {
+      try {
+        const content = await requestOnce(target, model, messages, opts);
+        return { content, model, skippedModels };
+      } catch (err) {
+        if (!(err instanceof ProviderError)) throw err;
+        if (err.kind !== "model_unavailable" && err.kind !== "overloaded") {
+          // e.g. the fallback model is rate limited: surface it, but keep the swap history.
+          throw new ProviderError(err.message, err.kind, err.status, err.retryAfterMs, skippedModels);
+        }
+        if (err.kind === "model_unavailable") unavailable.add(model);
+        else overloaded.push(model);
+        skippedModels.push({ model, reason: err.reason, next: candidates[i + 1] });
+        lastError = err;
       }
-      unavailable.add(model);
-      skippedModels.push({ model, reason: err.reason, next: models[i + 1] });
-      lastError = err;
     }
+
+    if (overloaded.length === 0 || pass === maxPasses) break;
+    const delay = overloadRetryDelayMs();
+    Object.assign(skippedModels[skippedModels.length - 1], { next: overloaded[0], afterMs: delay });
+    await sleep(delay);
+    candidates = overloaded;
   }
 
   const tried = [target.model, ...(target.fallbackModels ?? [])].join(", ");
+  const kind = lastError?.kind === "overloaded" ? "overloaded" : "model_unavailable";
   throw new ProviderError(
-    `${target.provider} has no available models (tried: ${tried})${lastError ? `: ${lastError.message}` : ""}`,
-    "model_unavailable",
-    lastError?.status ?? 404,
-    undefined,
+    kind === "overloaded"
+      ? `${target.provider} models are overloaded (tried: ${tried}): ${lastError?.message}`
+      : `${target.provider} has no available models (tried: ${tried})${lastError ? `: ${lastError.message}` : ""}`,
+    kind,
+    lastError?.status ?? (kind === "overloaded" ? 503 : 404),
+    lastError?.retryAfterMs,
     skippedModels,
   );
 }
@@ -187,6 +223,9 @@ async function requestOnce(
     }
     if (res.status === 401 || res.status === 403) {
       throw new ProviderError(`${target.provider} auth failed: ${detail}`, "auth", res.status);
+    }
+    if (res.status === 503 || (res.status >= 500 && OVERLOAD_TEXT.test(detail))) {
+      throw new ProviderError(`${target.provider} model ${model} overloaded: ${detail}`, "overloaded", res.status, retryAfterMs);
     }
     if (res.status >= 500) {
       throw new ProviderError(`${target.provider} server error: ${detail}`, "server", res.status, retryAfterMs);

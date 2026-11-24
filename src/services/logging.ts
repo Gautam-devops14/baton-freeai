@@ -18,7 +18,7 @@ export function log(
   });
 }
 
-/** Log each retired/not-found model a provider stepped past before it answered or gave up. */
+/** Log each retired or overloaded model a provider stepped past before it answered or gave up. */
 export function logModelSwaps(ws: BatonWorkspace, step: number, provider: string, skipped: SkippedModel[]): void {
   for (const s of skipped) {
     log(
@@ -26,7 +26,9 @@ export function logModelSwaps(ws: BatonWorkspace, step: number, provider: string
       step,
       "failover",
       { provider, model: s.model },
-      s.next ? `${s.reason}; retrying with ${s.next}` : `${s.reason}; no more ${provider} models to try`,
+      s.next
+        ? `${s.reason}; retrying with ${s.next}${s.afterMs ? ` in ${Math.round(s.afterMs / 100) / 10}s` : ""}`
+        : `${s.reason}; no more ${provider} models to try`,
     );
   }
 }

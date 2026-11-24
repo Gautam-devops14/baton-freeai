@@ -85,10 +85,15 @@ export function parsePlan(text: string): ParsedPlan {
 export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[]): Promise<void> {
   const messages = buildPlannerMessages(ws);
   let lastError: unknown;
+  const attempts: string[] = [];
 
   for (const [i, target] of targets.entries()) {
     try {
-      const result = await chatCompletion(target, messages, { jsonMode: true, temperature: 0.1 });
+      const result = await chatCompletion(target, messages, {
+        jsonMode: true,
+        temperature: 0.1,
+        retryOverloaded: i === targets.length - 1, // nobody left to hand off to: worth a short wait
+      });
       logModelSwaps(ws, 0, target.provider, result.skippedModels);
       const plan = parsePlan(result.content);
       ws.metadata = { ...ws.metadata, ...plan.metadata };
@@ -99,6 +104,7 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
       lastError = err;
       if (err instanceof ProviderError) logModelSwaps(ws, 0, target.provider, err.skippedModels);
       const reason = err instanceof ProviderError ? err.reason : `invalid plan (${(err as Error).message})`;
+      attempts.push(`${target.provider}: ${reason}`);
       const next = targets[i + 1];
       log(
         ws,
@@ -109,12 +115,27 @@ export async function planWorkspace(ws: BatonWorkspace, targets: ProviderTarget[
       );
     }
   }
-  throw new PlanningError(lastError);
+  throw new PlanningError(lastError, attempts, targets.length);
 }
 
+const HINTS: Partial<Record<string, string>> = {
+  overloaded: "the provider's servers are busy right now; this is usually temporary, so try again in a minute",
+  rate_limit: "your free-tier quota is used up for now; wait for it to reset",
+  auth: "check that the API key is correct",
+  model_unavailable: "the configured models are no longer offered; update GEMINI_MODELS",
+};
+
 export class PlanningError extends Error {
-  constructor(readonly cause: unknown) {
-    super(`Planning failed: ${(cause as Error)?.message ?? cause}`);
+  constructor(
+    readonly cause: unknown,
+    readonly attempts: string[] = [],
+    providerCount = attempts.length,
+  ) {
+    const kind = cause instanceof ProviderError ? cause.kind : undefined;
+    const parts = [`Planning failed (${attempts.join("; ") || (cause as Error)?.message || cause}).`];
+    if (kind && HINTS[kind]) parts.push(`Likely cause: ${HINTS[kind]}.`);
+    if (providerCount === 1) parts.push("Tip: add both a Groq and a Gemini key so Baton can switch providers when one is down.");
+    super(parts.join(" "));
     this.name = "PlanningError";
   }
 }

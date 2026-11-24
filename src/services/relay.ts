@@ -76,7 +76,9 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
 
     for (const [i, target] of candidates.entries()) {
       try {
-        const result = await chatCompletion(target, messages);
+        const result = await chatCompletion(target, messages, {
+          retryOverloaded: i === candidates.length - 1, // last resort: a short wait beats failing the task
+        });
         logModelSwaps(ws, task.id, target.provider, result.skippedModels);
         ws.artifacts[task.targetArtifact] = extractArtifactBody(result.content, task.targetArtifact);
         task.status = "completed";
@@ -88,7 +90,7 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
         const pe =
           err instanceof ProviderError ? err : new ProviderError((err as Error).message ?? String(err), "network");
         logModelSwaps(ws, task.id, target.provider, pe.skippedModels);
-        if (pe.kind === "rate_limit" || pe.kind === "server") {
+        if (pe.kind === "rate_limit" || pe.kind === "server" || pe.kind === "overloaded") {
           cooldowns.set(keyOf(target), now() + (pe.retryAfterMs ?? DEFAULT_COOLDOWN_MS));
         }
         const next = candidates[i + 1];
