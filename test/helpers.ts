@@ -14,8 +14,9 @@ process.env.BATON_MAX_RATE_WAIT_MS ??= "0";
 process.env.BATON_SHORT_RATE_WAIT_MS ??= "0";
 // The pacer has its own tests; keep it out of tests that make many quick Groq calls.
 process.env.BATON_TPM_LIMITS ??= "none=0";
-// Cool-down rounds (30s, 60s by default) have their own tests.
-process.env.BATON_COOLDOWN_STEPS ??= "";
+// Backoff rounds (full jitter, 15s base) and the circuit breaker have their own tests.
+process.env.BATON_BACKOFF_ROUNDS ??= "0";
+process.env.BATON_CIRCUIT_FAILS ??= "0";
 
 // Fake OpenAI-compatible provider backend for tests.
 export type Handler = (req: { url: string; model: string; body: any; signal?: AbortSignal }) => Promise<Response> | Response;

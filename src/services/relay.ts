@@ -2,8 +2,9 @@
 // Explicit and imperative by design (guardrail 5): every prompt is built here,
 // from the shared workspace, so any model can pick up where another stopped.
 
-import { chatCompletion, cooldownSteps, isCancelled, isTransient, ProviderError, sleepUnlessCancelled, stepDeadlineMs } from "../providers/client.js";
+import { chatCompletion, isCancelled, isTransient, ProviderError, sleepUnlessCancelled, stepDeadlineMs } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
+import { backoffRounds, countdownSleep, fullJitterDelay } from "./retry.js";
 import { busyUntilFor, isAccountSkipped, splitBusy } from "../providers/memory.js";
 import { attachBreakdown, buildCallBreakdown, log, logBusySkips, logModelSwaps, markWasted, traceFor } from "./logging.js";
 import { checkArtifact, extractArtifactBody } from "./sanitize.js";
@@ -294,7 +295,14 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
           result.usage = retry.usage;
           servedBy = retry.model;
           const still = checkArtifact(task.targetArtifact, ws.artifacts[task.targetArtifact]);
-          note = still ? ` (warning: ${still})` : " (fixed after a file check)";
+          if (still) {
+            // Strict memory boundary: unverified text never enters the shared project files.
+            markWasted(ws, task.id, retry.model);
+            if (original === undefined) delete ws.artifacts[task.targetArtifact];
+            else ws.artifacts[task.targetArtifact] = original;
+            throw new ProviderError(`${target.provider}: reply failed the file check twice`, "bad_response", undefined, undefined, [], `rejected, not saved: ${still}`);
+          }
+          note = " (fixed after a file check)";
         }
         task.status = "completed";
         task.assignedProvider = target.provider;
@@ -374,13 +382,16 @@ export async function runRelay(ws: BatonWorkspace, opts: RelayOptions): Promise<
     // Cool-down rounds: every provider failed with problems that usually clear within a minute
     // (rate limits, 503 blips, timeouts). Wait, then retry the whole order, before giving up.
     if (!done() && sawTransient && !outOfTime()) {
-      for (const secs of cooldownSteps()) {
-        if (!fits(secs * 1000 + 1000)) break; // waiting would blow the step's time limit
+      const rounds = backoffRounds();
+      for (let round = 0; round < rounds; round++) {
+        const ms = fullJitterDelay(round); // random, so users don't all retry at the same moment
+        if (!fits(ms + 1000)) break; // waiting would blow the step's time limit
         const retryable = opts.targets.filter((t) => cooldowns.get(keyOf(t)) !== Number.POSITIVE_INFINITY && !isAccountSkipped(t));
         if (!retryable.length) break;
+        const order = retryable.map((t) => PROVIDER_NAMES[t.provider] ?? t.provider).join(" → ");
         log(ws, task.id, "failover", { provider: "baton", model: "relay" },
-          `all providers are busy or rate limited; cooling down ${secs}s, then retrying ${retryable.map((t) => PROVIDER_NAMES[t.provider] ?? t.provider).join(" → ")}`);
-        await sleep(secs * 1000);
+          `all providers are busy or rate limited; backing off ${(ms / 1000).toFixed(1)}s (random, round ${round + 1}/${rounds}), then retrying ${order}`);
+        await countdownSleep(ms, ws.signal, (secondsLeft) => ws.emit?.({ type: "wait", step: task.id, secondsLeft, label: `retrying ${order}` }));
         for (const [i, target] of retryable.entries()) {
           if (outOfTime()) break;
           cooldowns.delete(keyOf(target));

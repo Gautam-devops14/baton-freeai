@@ -12,7 +12,7 @@ const reply = (c: string) => new Response(JSON.stringify({ choices: [{ message: 
 test("no 4-file cap: a 6-file plan builds every file, frontend included", async () => {
   installFetch(({ body }) => {
     if (body.messages?.[0]?.content?.includes("Task Architect")) return reply(PLAN);
-    return reply("```\nok\n```");
+    return reply("```\n{\"ok\": true}\n```");
   });
   const res: any = await orchestrate({ userPrompt: "Build a student app with login and dashboard", keys: { groqApiKey: "g" } }, new InMemoryWorkspaceStore());
   assert.equal(res.status, "success");

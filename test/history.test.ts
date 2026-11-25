@@ -22,7 +22,7 @@ function freshServer(dir = mkdtempSync(join(tmpdir(), "baton-hist-"))) {
 const post = (app: any, payload: object) => app.inject({ method: "POST", url: "/api/orchestrate", payload });
 
 test("successful run is saved with prompt, log and files, and survives a server restart", async () => {
-  installFetch(({ body }) => (isPlanner(body) ? completion(PLAN) : completion("content")));
+  installFetch(({ body }) => (isPlanner(body) ? completion(PLAN) : completion("{\"content\": true}")));
   const { dir, app } = freshServer();
   const out = (await post(app, { userPrompt: "Build a tiny server", keys: KEYS })).json();
   assert.equal(out.historyId, out.workspaceId);
@@ -47,7 +47,7 @@ test("successful run is saved with prompt, log and files, and survives a server 
 });
 
 test("API keys are never written to history files", async () => {
-  installFetch(({ body }) => (isPlanner(body) ? completion(PLAN) : completion("content")));
+  installFetch(({ body }) => (isPlanner(body) ? completion(PLAN) : completion("{\"content\": true}")));
   const { dir, app } = freshServer();
   await post(app, { userPrompt: "Build a tiny server", keys: KEYS });
   await post(app, { userPrompt: "hello" });

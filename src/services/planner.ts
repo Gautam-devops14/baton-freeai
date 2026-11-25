@@ -2,9 +2,10 @@
 // Planning is isolated from generation (guardrail 4) so the blueprint survives
 // even if a later generation call fails or runs out of tokens.
 
-import { chatCompletion, cooldownSteps, isCancelled, isTransient, ProviderError, sleepUnlessCancelled, stepDeadlineMs } from "../providers/client.js";
+import { chatCompletion, isCancelled, isTransient, ProviderError, stepDeadlineMs } from "../providers/client.js";
 import type { BatonTask, BatonWorkspace, ChatMessage, ProviderTarget } from "../types.js";
 import { safeArtifactPath } from "./paths.js";
+import { backoffRounds, countdownSleep, fullJitterDelay } from "./retry.js";
 import { isAccountSkipped, splitBusy } from "../providers/memory.js";
 import { contextFile, recordContext } from "./context.js";
 import { outlineFile } from "./outline.js";
@@ -286,12 +287,15 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
   if (await round(targets)) return;
 
   // Cool-down rounds: the planners failed with problems that usually clear within a minute.
-  for (const secs of cooldownSteps()) {
+  const rounds = backoffRounds();
+  for (let n = 0; n < rounds; n++) {
+    const ms = fullJitterDelay(n); // random, so users don't all retry at the same moment
     const retryable = allTargets.filter((t) => (transient.has(t) || !targets.includes(t)) && !isAccountSkipped(t));
-    if (!transient.size || !retryable.length || !fits(secs * 1000 + 1000)) break;
+    if (!transient.size || !retryable.length || !fits(ms + 1000)) break;
+    const order = retryable.map((t) => t.provider).join(" → ");
     log(ws, 0, "failover", { provider: "baton", model: "planner" },
-      `all planners are busy or rate limited; cooling down ${secs}s, then retrying ${retryable.map((t) => t.provider).join(" → ")}`);
-    await sleepUnlessCancelled(secs * 1000, ws.signal);
+      `all planners are busy or rate limited; backing off ${(ms / 1000).toFixed(1)}s (random, round ${n + 1}/${rounds}), then retrying ${order}`);
+    await countdownSleep(ms, ws.signal, (secondsLeft) => ws.emit?.({ type: "wait", step: 0, secondsLeft, label: `retrying ${order}` }));
     if (await round(retryable)) return;
   }
 

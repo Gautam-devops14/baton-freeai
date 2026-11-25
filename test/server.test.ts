@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildServer } from "../src/index.js";
 import { calls, completion, installFetch, rateLimited } from "./helpers.js";
+const OK = "{\"ok\": true}"; // valid in every file type the fake plans (json, js, html)
 
 const KEYS = { groqApiKey: "gsk_test", geminiApiKey: "AIza_test" };
 const PLAN = JSON.stringify({
@@ -90,7 +91,7 @@ test("full relay: Groq sprint, 429 failover to Gemini with full context, zip dow
 test("planner falls back to Groq when Gemini is rate limited", async () => {
   installFetch(({ url, body }) => {
     if (isGemini(url)) return rateLimited();
-    return isPlanner(body) ? completion(PLAN) : completion("ok");
+    return isPlanner(body) ? completion(PLAN) : completion(OK);
   });
   const res = await buildServer().inject({
     method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: KEYS },
@@ -157,7 +158,7 @@ test("retired Gemini model: planner swaps to the lite model, relay skips the dea
   installFetch(({ url, model, body }) => {
     if (!isGemini(url)) return rateLimited(); // force every task onto Gemini
     if (model === "gemini-3.8-flash") return RETIRED.clone();
-    return isPlanner(body) ? completion(PLAN) : completion("ok");
+    return isPlanner(body) ? completion(PLAN) : completion(OK);
   });
   const out = (await buildServer().inject({
     method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: KEYS },
@@ -179,7 +180,7 @@ test("retired Gemini model: planner swaps to the lite model, relay skips the dea
 test("all Gemini models retired: planning falls over to Groq only after both were tried", async () => {
   installFetch(({ url, body }) => {
     if (isGemini(url)) return new Response('{"error":{"message":"no longer available"}}', { status: 404 });
-    return isPlanner(body) ? completion(PLAN) : completion("ok");
+    return isPlanner(body) ? completion(PLAN) : completion(OK);
   });
   const out = (await buildServer().inject({
     method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: KEYS },
@@ -202,7 +203,7 @@ const OVERLOADED = () => new Response(
 test("Gemini overloaded with both keys: planner hands off to Groq at once, without waiting", async () => {
   process.env.BATON_OVERLOAD_RETRY_MS = "5000"; // would make the test slow if we waited
   try {
-    installFetch(({ url, body }) => (isGemini(url) ? OVERLOADED() : isPlanner(body) ? completion(PLAN) : completion("ok")));
+    installFetch(({ url, body }) => (isGemini(url) ? OVERLOADED() : isPlanner(body) ? completion(PLAN) : completion(OK)));
     const t0 = Date.now();
     const out = (await buildServer().inject({
       method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: KEYS },
@@ -233,7 +234,7 @@ test("Gemini-only and overloaded: retries once, then a clear 502 with a hint", a
 test("Gemini-only: overloaded first, recovers on the retry pass", async () => {
   process.env.BATON_OVERLOAD_RETRY_MS = "100";
   let n = 0;
-  installFetch(({ body }) => (++n <= 2 ? OVERLOADED() : isPlanner(body) ? completion(PLAN) : completion("ok")));
+  installFetch(({ body }) => (++n <= 2 ? OVERLOADED() : isPlanner(body) ? completion(PLAN) : completion(OK)));
   const out = (await buildServer().inject({
     method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: { geminiApiKey: "AIza_test" } },
   })).json();
@@ -261,7 +262,7 @@ test("OpenAI target: last in the waterfall, model fallback list, no temperature 
   assert.deepEqual(openai.fallbackModels, ["gpt-4.1-mini"]);
 
   let sent: any;
-  installFetch(({ body }) => ((sent = body), completion("ok")));
+  installFetch(({ body }) => ((sent = body), completion(OK)));
   const { chatCompletion } = await import("../src/providers/client.js");
   await chatCompletion(openai, [], { temperature: 0.1 });
   assert.equal("temperature" in sent, false);
@@ -270,7 +271,7 @@ test("OpenAI target: last in the waterfall, model fallback list, no temperature 
 test("OpenAI only used after Groq and Gemini both fail", async () => {
   installFetch(({ url, body }) => {
     if (isGemini(url) && isPlanner(body)) return completion(PLAN);
-    if (isOpenAI(url)) return completion("from openai");
+    if (isOpenAI(url)) return completion("{\"from\": \"openai\"}");
     return rateLimited(); // Groq and Gemini execution both rate limited
   });
   const out = (await buildServer().inject({
@@ -284,13 +285,13 @@ test("OpenAI only used after Groq and Gemini both fail", async () => {
     "failover:groq", "failover:google", "execute:openai",
   ]);
   assert.ok(out.executionLogs.some((l: any) => l.step === 1 && l.provider === "google" && /passing baton to OpenAI/.test(l.message)));
-  assert.equal(out.artifacts["package.json"], "from openai\n");
+  assert.equal(out.artifacts["package.json"], "{\"from\": \"openai\"}\n");
 });
 
 test("OpenAI key alone is enough to run", async () => {
   installFetch(({ url, body }) => {
     assert.ok(isOpenAI(url), "only OpenAI should be called");
-    return isPlanner(body) ? completion(PLAN) : completion("ok");
+    return isPlanner(body) ? completion(PLAN) : completion(OK);
   });
   const out = (await buildServer().inject({
     method: "POST", url: "/api/orchestrate", payload: { userPrompt: "Build an auth service", keys: { openaiApiKey: "sk-test" } },

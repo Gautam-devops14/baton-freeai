@@ -1088,11 +1088,21 @@ export const UI_HTML = /* html */ `<!doctype html>
     const node = el("div", { className: "msg" }, el("div", { className: "avatar", textContent: "B" }),
       el("div", { className: "bot" }, el("div", { className: "bot-head" }, el("span", { className: "who", textContent: "Baton" }), el("span", { className: "pill running" }, el("span", { className: "spinner" }), "Working"), timer), list));
     const calls = new Map();
+    let waitLi = null;
     const add = (ic, cls, text) => { const li = el("li", {}, el("span", { className: "ic " + cls, textContent: ic }), el("span", { className: cls === "dim" ? "dim" : "", textContent: text })); list.append(li); scrollBottom(); return li; };
     return {
       node,
       stop() { clearInterval(tick); },
       onEvent(e) {
+        if (e.type === "wait") {
+          // Live countdown while Baton backs off before retrying every provider.
+          const where = e.step === 0 ? "Planning" : "Step " + e.step;
+          if (e.secondsLeft <= 0) { if (waitLi) { waitLi.remove(); waitLi = null; } return; }
+          const text = where + ": " + e.label + " in " + e.secondsLeft + "s...";
+          if (!waitLi) waitLi = add("⏱", "wait", text);
+          else waitLi.lastChild.textContent = text;
+          return;
+        }
         if (e.type === "start") add("·", "dim", e.followUpOf ? "Continuing this project" : "Starting");
         else if (e.type === "plan") add("✓", "ok", "Planned " + e.tasks.length + " file" + (e.tasks.length === 1 ? "" : "s") + ": " + e.tasks.map((t) => t.targetArtifact).join(", "));
         else if (e.type === "call") {
@@ -1122,7 +1132,9 @@ export const UI_HTML = /* html */ `<!doctype html>
           else if (l.event === "failover" && m.indexOf("time limit") >= 0) add("⏱", "bad", m.charAt(0).toUpperCase() + m.slice(1));
           else if (l.event === "failover" && m.indexOf("skipped:") === 0) add("↷", "dim", "Skipped " + (PROVIDER_LABEL[l.provider] || l.provider) + ": " + m.split(": ").slice(2).join(": "));
           else if (l.event === "failover" && (m.indexOf("waiting ") === 0 || m.indexOf("pacing:") === 0)) add("⏱", "wait", (PROVIDER_LABEL[l.provider] || l.provider) + ": " + m);
-          else if (l.event === "failover" && m.indexOf("cooling down") >= 0) add("⏱", "wait", m.charAt(0).toUpperCase() + m.slice(1));
+          else if (l.event === "failover" && (m.indexOf("cooling down") >= 0 || m.indexOf("backing off") >= 0)) add("⏱", "wait", m.charAt(0).toUpperCase() + m.slice(1));
+          else if (l.event === "failover" && m.indexOf("circuit open") === 0) add("↷", "dim", (PROVIDER_LABEL[l.provider] || l.provider) + ": " + m.split(";").slice(0, 2).join(";"));
+          else if (l.event === "failover" && m.indexOf("rejected, not saved") >= 0) add("✗", "bad", m.split("; passing")[0]);
           else if (l.event === "failover" && m.indexOf("file check failed") === 0) add("↻", "wait", m);
           else if (l.event === "failover" && m.indexOf("passing") >= 0) add("→", "dim", m.slice(m.indexOf(";") + 2));
         }
@@ -1308,6 +1320,7 @@ export const UI_HTML = /* html */ `<!doctype html>
       let text = ev.type;
       if (ev.type === "call") text += " " + ev.call.phase + " step=" + ev.call.step + " " + ev.call.provider + "/" + ev.call.model + (ev.call.phase === "end" ? " status=" + (ev.call.status || "-") + " " + ev.call.outcome + " " + ev.call.latencyMs + "ms" : "");
       else if (ev.type === "log") text += " [" + ev.entry.step + "] " + ev.entry.event + " " + ev.entry.provider + ": " + ev.entry.message;
+      else if (ev.type === "wait") text += " step=" + ev.step + " " + ev.label + " in " + ev.secondsLeft + "s";
       else if (ev.type === "plan") text += " " + ev.tasks.map((t) => t.targetArtifact).join(", ");
       else if (ev.type === "done") text += " status=" + ev.status + (ev.historyId ? " id=" + ev.historyId : "");
       else if (ev.type === "start") text += " run=" + ev.runId + (ev.followUpOf ? " followUpOf=" + ev.followUpOf : "");

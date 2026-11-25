@@ -43,7 +43,7 @@ test("NVIDIA rescues the user's case: Gemini overloaded + OpenAI out of credit",
   process.env.BATON_OVERLOAD_RETRY_MS = "0";
   installFetch(({ url, body }) => {
     if (isGemini(url)) return new Response('{"error":{"code":503,"message":"high demand","status":"UNAVAILABLE"}}', { status: 503 });
-    if (isNvidia(url)) return isPlanner(body) ? reply(PLAN, usage(300, 60)) : reply("ok", usage(500, 100));
+    if (isNvidia(url)) return isPlanner(body) ? reply(PLAN, usage(300, 60)) : reply("{\"ok\": true}", usage(500, 100));
     return new Response('{"error":{"code":"insufficient_quota","message":"check your plan and billing details"}}', { status: 429 });
   });
   const out = (await buildServer().inject({

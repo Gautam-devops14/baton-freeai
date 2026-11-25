@@ -9,6 +9,7 @@ import { cancelRun, CLIENT_RUN_ID_RE, registerRun, subscribeProgress } from "./s
 import { providerOrder } from "./services/orchestrator.js";
 import { DEFAULT_TIMEOUT_MS } from "./providers/client.js";
 import { forgetProviderMemory, snapshotMemory } from "./providers/memory.js";
+import { snapshotCircuits } from "./providers/circuitBreaker.js";
 import { recentCalls } from "./providers/trace.js";
 import { GROQ_BASE_URL, GROQ_MODELS } from "./providers/groq.js";
 import { GEMINI_BASE_URL, GEMINI_MODELS } from "./providers/gemini.js";
@@ -185,6 +186,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
         historyMax: Number(process.env.BATON_HISTORY_MAX ?? 500),
       },
       memory: snapshotMemory(),
+      circuits: snapshotCircuits(),
       recentCalls: recentCalls(100),
     };
   };

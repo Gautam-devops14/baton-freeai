@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chatCompletion, ProviderError } from "../src/providers/client.js";
 import { calls, completion, installFetch, rateLimited } from "./helpers.js";
+const OK = "{\"ok\": true}"; // valid in every file type the fake plans (json, js, html)
 
 const target = { provider: "groq", model: "m", baseUrl: "https://example.test/v1/", apiKey: "k" };
 
@@ -69,12 +70,12 @@ test("'no longer available' on a 400 also retries with the next model", async ()
   installFetch(({ model }) =>
     model === "gemini-3.8-flash"
       ? new Response('{"error":{"message":"models/gemini-3.8-flash is no longer available"}}', { status: 400 })
-      : completion("ok"));
+      : completion(OK));
   assert.equal((await chatCompletion(gemini(), [])).model, "gemini-3.5-flash-lite");
 });
 
 test("a 400 on one model tries the provider's next model (it may be model-specific, e.g. context too long)", async () => {
-  installFetch(({ model }) => (model === "gemini-3.8-flash" ? new Response('{"error":{"message":"context length exceeded"}}', { status: 400 }) : completion("ok")));
+  installFetch(({ model }) => (model === "gemini-3.8-flash" ? new Response('{"error":{"message":"context length exceeded"}}', { status: 400 }) : completion(OK)));
   assert.equal((await chatCompletion(gemini(), [])).model, "gemini-3.5-flash-lite");
 });
 
@@ -107,7 +108,7 @@ test("account-level problems (key rejected) stop at the first model: other model
 });
 
 test("a retired model is remembered on the target and skipped on later calls", async () => {
-  installFetch(({ model }) => (model === "gemini-3.8-flash" ? new Response(RETIRED_BODY, { status: 404 }) : completion("ok")));
+  installFetch(({ model }) => (model === "gemini-3.8-flash" ? new Response(RETIRED_BODY, { status: 404 }) : completion(OK)));
   const t = gemini();
   await chatCompletion(t, []);
   await chatCompletion(t, []);

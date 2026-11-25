@@ -195,6 +195,8 @@ export type ProgressEvent =
   | { type: "start"; runId: string; chatId?: string; followUpOf?: string }
   | { type: "log"; entry: ExecutionLog }
   | { type: "call"; call: CallTrace }
+  /** Live countdown while Baton backs off before retrying every provider. */
+  | { type: "wait"; step: number; secondsLeft: number; label: string }
   | { type: "plan"; tasks: Array<{ id: number; targetArtifact: string; title: string }> }
   | { type: "done"; status: string; historyId?: string; message?: string };
 

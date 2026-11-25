@@ -114,7 +114,7 @@ test("a provider busy on every model is skipped for a few minutes, in later step
   installFetch(({ url, body }) => {
     if (host(url).includes("generativelanguage")) return busy();
     if (isPlanner(body)) return reply('{"tasks":[{"title":"A","targetArtifact":"a.js"},{"title":"B","targetArtifact":"b.js"}]}');
-    return groqBuilds ? reply("ok") : new Response("{}", { status: 429 });
+    return groqBuilds ? reply("const ok = 1;") : new Response("{}", { status: 429 });
   });
   const keys = { geminiApiKey: "m", groqApiKey: "g" };
   const order = { BATON_PLANNER_ORDER: "google,groq", BATON_RELAY_ORDER: "groq,google" };
@@ -152,7 +152,7 @@ test("follow-up: edits the existing project with full context, keeps untouched f
     }
     prompts.task.push(user);
     const target = /Produce the full contents of `([^`]+)`/.exec(user)![1];
-    return reply(`/* ${target} v${phase} */`);
+    return reply(target.endsWith(".json") ? `{"v": "${target} v${phase}"}` : target.endsWith(".svg") ? `<svg xmlns="http://www.w3.org/2000/svg"><!-- v${phase} --></svg>` : `/* ${target} v${phase} */`);
   });
   const app = server();
   const keys = { nvidiaApiKey: "n" };

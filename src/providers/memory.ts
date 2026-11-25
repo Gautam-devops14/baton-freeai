@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import type { ProviderTarget } from "../types.js";
 import { resetPacer } from "./pacer.js";
+import { resetCircuits } from "./circuitBreaker.js";
 
 const deadTtlMs = () => Number(process.env.BATON_DEAD_MODEL_TTL_MS ?? 24 * 3600_000);
 const busySkipMs = () => Number(process.env.BATON_BUSY_SKIP_MS ?? 5 * 60_000);
@@ -160,6 +161,7 @@ export function forgetProviderMemory(): void {
 /** Tests only: forget everything, optionally with a fake clock. */
 export function resetProviderMemory(clock?: () => number): void {
   resetPacer(clock);
+  resetCircuits(clock);
   deadModels.clear();
   discovered.clear();
   busyUntil.clear();

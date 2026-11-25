@@ -1,6 +1,7 @@
 // Unified OpenAI-compatible chat client (spec §5, guardrails 1 & 3).
 // One fetch helper for every provider; no vendor SDKs.
 
+import { circuitAllows, recordFailure, recordSuccess, releaseProbe } from "./circuitBreaker.js";
 import type { CallTrace, ChatMessage, ProviderTarget, TokenUsage } from "../types.js";
 import { listModels, rankModels } from "./discovery.js";
 import { rememberCall } from "./trace.js";
@@ -83,9 +84,12 @@ export class ProviderError extends Error {
   model?: string;
   /** The problem affects the whole account (e.g. a daily cap), so other models won't help. */
   accountLevel?: boolean;
+  /** Set when the provider was skipped instantly because its circuit breaker is open (no request sent). */
+  circuitOpen?: string;
 
   /** Short human-readable reason used in execution logs. */
   get reason(): string {
+    if (this.circuitOpen) return this.circuitOpen;
     const base = this.baseReason();
     const showDetail = this.detail && ["client", "model_unavailable", "auth", "bad_response", "server", "timeout"].includes(this.kind);
     return showDetail ? `${base}: ${this.detail}` : base;
@@ -269,13 +273,6 @@ export function isTransient(err: ProviderError): boolean {
   return ["rate_limit", "overloaded", "timeout", "server", "network"].includes(err.kind);
 }
 
-/** Cool-down waits (seconds) before retrying the whole provider order, from BATON_COOLDOWN_STEPS (default "30,60"). */
-export function cooldownSteps(): number[] {
-  return (process.env.BATON_COOLDOWN_STEPS ?? "30,60")
-    .split(",")
-    .map((s) => Number(s.trim()))
-    .filter((n) => Number.isFinite(n) && n > 0);
-}
 
 /** When every model failed, report the most actionable reason (a rate limit can be waited out; a retirement can't). */
 const KIND_PRIORITY: ProviderErrorKind[] = ["rate_limit", "overloaded", "timeout", "server", "bad_response", "client", "model_unavailable"];
@@ -292,7 +289,39 @@ const KIND_PRIORITY: ProviderErrorKind[] = ["rate_limit", "overloaded", "timeout
  *  - Retired models are remembered (this run and later runs). With
  *    `retryOverloaded`, overloaded models get one more pass after a pause.
  */
+/** Errors that count toward tripping a provider's circuit: 429, 503/overload, timeouts (not our own step deadline). */
+const countsForCircuit = (e: ProviderError) =>
+  !e.circuitOpen && e.detail !== "step time limit reached" &&
+  (e.kind === "rate_limit" || e.kind === "overloaded" || e.kind === "timeout" || (e.kind === "server" && e.status === 503));
+
+/**
+ * One provider call (trying its models in order), behind a circuit breaker: a provider that failed
+ * 3 times in a row is skipped instantly for 45s instead of costing another 12s timeout.
+ */
 export async function chatCompletion(
+  target: ProviderTarget,
+  messages: ChatMessage[],
+  opts: ChatOptions = {},
+): Promise<ChatResult> {
+  const gate = circuitAllows(target);
+  if (!gate.ok) {
+    const secs = Math.max(1, Math.ceil(gate.retryInMs / 1000));
+    const e = new ProviderError(`${target.provider}: circuit open`, "overloaded", 503, gate.retryInMs);
+    e.circuitOpen = `circuit open (${gate.failures} failures in a row); skipped instantly, next trial in ${secs}s`;
+    throw e;
+  }
+  try {
+    const result = await chatCompletionInner(target, messages, opts);
+    recordSuccess(target);
+    return result;
+  } catch (err) {
+    if (err instanceof ProviderError && countsForCircuit(err)) recordFailure(target);
+    else releaseProbe(target);
+    throw err;
+  }
+}
+
+async function chatCompletionInner(
   target: ProviderTarget,
   messages: ChatMessage[],
   opts: ChatOptions = {},
