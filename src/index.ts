@@ -2,6 +2,7 @@
 
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { pathToFileURL } from "node:url";
+import { contentTypeFor, PREVIEW_CSP, previewEntry, withPreviewShim } from "./services/preview.js";
 import { createArtifactZip } from "./services/bundler.js";
 import { mergeBreakdowns, mergeUsage } from "./services/logging.js";
 import { cancelRun, CLIENT_RUN_ID_RE, registerRun, subscribeProgress } from "./services/progress.js";
@@ -350,6 +351,25 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
       }
     },
   );
+
+  // ---- Live preview (sandboxed) ----
+  const previewFiles = async (id: string) =>
+    HISTORY_ID_RE.test(id) ? ((await store.get(id))?.artifacts ?? (await history.get(id))?.artifacts) : undefined;
+  app.get<{ Params: { id: string } }>("/api/preview/:id", async (req, reply) => {
+    const files = await previewFiles(req.params.id);
+    const entry = files && previewEntry(files);
+    if (!entry) return reply.code(404).send({ status: "error", error: "no_preview", message: "This project has no HTML page to preview." });
+    return reply.redirect(`/api/preview/${req.params.id}/${entry.split("/").map(encodeURIComponent).join("/")}`);
+  });
+  app.get<{ Params: { id: string; "*": string } }>("/api/preview/:id/*", async (req, reply) => {
+    const files = await previewFiles(req.params.id);
+    const path = decodeURIComponent(req.params["*"] || "").replace(/^\/+/, "");
+    const target = files && (files[path] !== undefined ? path : path === "" ? previewEntry(files) : undefined);
+    reply.header("Content-Security-Policy", PREVIEW_CSP).header("X-Content-Type-Options", "nosniff").header("Cache-Control", "no-store");
+    if (!files || !target) return reply.code(404).type("text/plain; charset=utf-8").send(`Not in this project: ${path}`);
+    const body = /\.html?$/i.test(target) ? withPreviewShim(files[target]) : files[target];
+    return reply.type(contentTypeFor(target)).send(body);
+  });
 
   app.get<{ Params: { workspaceId: string } }>("/api/download/:workspaceId", async (req, reply) => {
     const { workspaceId } = req.params;

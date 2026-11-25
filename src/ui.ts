@@ -309,6 +309,11 @@ export const UI_HTML = /* html */ `<!doctype html>
   .orderlist .arrows button { border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 0 7px; font-size: 13px; }
   .orderlist .arrows button:disabled { opacity: .35; cursor: default; }
   #fileDlg { width: min(960px, calc(100vw - 32px)); }
+  #previewDlg { width: min(1200px, calc(100vw - 32px)); }
+  .pv-stage { background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; justify-content: center; }
+  .pv-stage iframe { width: 100%; height: 68vh; border: 0; border-radius: 8px; background: #fff; box-shadow: var(--shadow-sm); transition: width .2s; }
+  .pv-stage.phone iframe { width: 390px; max-width: 100%; }
+  .pv-note { color: var(--muted); font-size: 12px; margin-top: 8px; }
   #fileDlg pre.file { margin: 0; background: var(--code); border-radius: 10px; padding: 14px; font: 12.5px/1.55 var(--mono); overflow: auto; max-height: 62vh; white-space: pre; border: 1px solid var(--line); }
   .ftabs { display: inline-flex; gap: 2px; background: var(--hover); border-radius: 9px; padding: 3px; margin-bottom: 10px; }
   .ftabs button { border: 0; background: none; border-radius: 7px; padding: 4px 12px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
@@ -361,6 +366,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     <header class="topbar">
       <button type="button" class="ghost menu-btn" id="menuBtn" aria-label="Open chats"><span class="ico" data-icon="menu"></span></button>
       <div class="title-wrap" id="titleWrap"></div>
+      <button type="button" class="btn-s" id="previewLatest" hidden title="Run the app in a sandboxed preview"><span class="ico" data-icon="play"></span><span class="txt">Preview</span></button>
       <a class="btn-s" id="downloadLatest" hidden title="Download the project as a .zip"><span class="ico" data-icon="download"></span><span class="txt">Download</span></a>
       <a class="btn-s" id="exportChat" hidden title="Transcript + full data + files, as a zip (no API keys)"><span class="ico" data-icon="archive"></span><span class="txt">Export</span></a>
       <button type="button" class="btn-s" id="debugBtn" aria-pressed="false"><span class="ico" data-icon="bug"></span><span class="txt">Debug</span></button>
@@ -422,6 +428,16 @@ export const UI_HTML = /* html */ `<!doctype html>
 <dialog id="fileDlg">
   <div class="dlg-head"><h2 id="fileName">file</h2><span style="display:flex;gap:6px"><button type="button" class="btn-s" id="copyFile"><span class="ico" data-icon="copy"></span><span class="txt">Copy</span></button><button type="button" class="ghost" id="closeFile" aria-label="Close"><span class="ico" data-icon="x"></span></button></span></div>
   <div class="dlg-body"><div class="ftabs" id="fileTabs" hidden><button type="button" data-ft="content" class="on">Content</button><button type="button" data-ft="diff">Changes</button></div><div id="fileBody"></div></div>
+</dialog>
+
+<dialog id="previewDlg">
+  <div class="dlg-head"><h2 id="previewTitle">Live preview</h2><span style="display:flex;gap:6px;align-items:center">
+    <span class="ftabs" style="margin:0"><button type="button" data-pv="desktop" class="on">Desktop</button><button type="button" data-pv="phone">Phone</button></span>
+    <button type="button" class="btn-s" id="pvReload"><span class="ico" data-icon="refresh"></span><span class="txt">Reload</span></button>
+    <a class="btn-s" id="pvOpen" target="_blank" rel="noopener"><span class="ico" data-icon="globe"></span><span class="txt">New tab</span></a>
+    <button type="button" class="ghost" id="closePreview" aria-label="Close"><span class="ico" data-icon="x"></span></button></span></div>
+  <div class="dlg-body"><div class="pv-stage" id="pvStage"><iframe id="pvFrame" title="Live preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe></div>
+  <div class="pv-note">Runs in a sandbox: the app can't see Baton or your API keys. Saved data (localStorage) resets when you reload.</div></div>
 </dialog>
 
 <div class="toast" id="toast" role="status"></div>
@@ -851,6 +867,7 @@ export const UI_HTML = /* html */ `<!doctype html>
   function showWelcome() {
     renderTitle();
     $("downloadLatest").hidden = true;
+    $("previewLatest").hidden = true;
     $("exportChat").hidden = true;
     $("threadInner").replaceChildren(el("div", { className: "welcome" },
       el("div", { className: "mark", textContent: "B" }),
@@ -887,6 +904,8 @@ export const UI_HTML = /* html */ `<!doctype html>
     $("threadInner").replaceChildren(...recs.flatMap((rec) => [userMsg(rec.userPrompt), botMsg(rec)]));
     const latestFiles = [...recs].reverse().find((r) => Object.keys(r.artifacts || {}).length && r.status !== "error");
     $("downloadLatest").hidden = !latestFiles;
+    $("previewLatest").hidden = !(latestFiles && canPreview(latestFiles));
+    $("previewLatest").onclick = () => latestFiles && openPreview(latestFiles);
     if (latestFiles) $("downloadLatest").href = "/api/download/" + latestFiles.id;
     $("exportChat").hidden = false;
     $("exportChat").href = "/api/export/chat/" + encodeURIComponent(chat.id);
@@ -970,6 +989,7 @@ export const UI_HTML = /* html */ `<!doctype html>
     if (meta) body.append(el("div", { className: "mmeta", textContent: meta }));
     const actions = el("div", { className: "mactions" });
     const act = (ic, label, fn, primary) => { const b = el("button", { type: "button", className: "act" + (primary ? " primary" : "") }, icon(ic), label); b.onclick = fn; actions.append(b); return b; };
+    if (files.length && rec.status !== "error" && rec.id && canPreview(rec)) act("play", "Live preview", () => openPreview(rec), true);
     if (files.length && rec.status !== "error" && rec.id && !partial) actions.append(el("a", { className: "act primary", href: "/api/download/" + rec.id }, icon("download"), "Download"));
     if (rec.parentId && ch && ch.modified.length) act("diff", "Changes", () => { selectedRunId = rec.id; openDebug("run", "diff"); });
     if (rec.status === "answered" || rec.status === "gated") act("copy", "Copy", async () => { try { await navigator.clipboard.writeText(rec.message || ""); toast("Copied"); } catch { toast("Copy failed"); } });
@@ -978,6 +998,22 @@ export const UI_HTML = /* html */ `<!doctype html>
     body.append(actions);
     return el("div", { className: "msg" }, el("div", { className: "avatar", textContent: "B" }), body);
   }
+
+  // ---------- live preview ----------
+  const canPreview = (rec) => Object.keys(rec.artifacts || {}).some((f) => /[.]html?$/i.test(f));
+  function openPreview(rec) {
+    const url = "/api/preview/" + encodeURIComponent(rec.id);
+    $("previewTitle").textContent = "Live preview" + (currentChat() ? " · " + projectName(currentChat()) : "");
+    $("pvOpen").href = url;
+    $("pvFrame").src = url;
+    if (!$("previewDlg").open) $("previewDlg").showModal();
+  }
+  for (const b of document.querySelectorAll("[data-pv]")) b.onclick = () => {
+    for (const x of document.querySelectorAll("[data-pv]")) x.classList.toggle("on", x === b);
+    $("pvStage").classList.toggle("phone", b.dataset.pv === "phone");
+  };
+  $("pvReload").onclick = () => { const f = $("pvFrame"); const u = f.src; f.src = "about:blank"; setTimeout(() => (f.src = u), 50); };
+  $("closePreview").onclick = () => { $("previewDlg").close(); $("pvFrame").src = "about:blank"; };
 
   // ---------- file viewer with diff ----------
   const diffCache = new Map();
