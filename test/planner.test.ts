@@ -17,9 +17,9 @@ test("parses decisions and ordered tasks", () => {
   ]);
 });
 
-test("tolerates fenced JSON and caps at four tasks", () => {
+test("tolerates fenced JSON and keeps every task (no 4-file cap)", () => {
   const tasks = Array.from({ length: 6 }, (_, i) => ({ title: `t${i}`, targetArtifact: `f${i}.js` }));
-  assert.equal(parsePlan("```json\n" + plan(tasks) + "\n```").tasks.length, 4);
+  assert.equal(parsePlan("```json\n" + plan(tasks) + "\n```").tasks.length, 6);
 });
 
 test("rejects path traversal, absolute-path tricks and duplicates", () => {

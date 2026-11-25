@@ -13,7 +13,14 @@ import { attachBreakdown, log, logBusySkips, logModelSwaps, traceFor } from "./l
 
 /** We ask for 2-4 tasks (spec), but accept a 1-task plan rather than failing a small request. */
 export const MIN_TASKS = 2;
-export const MAX_TASKS = 4;
+/**
+ * No real file limit: a plan builds every file it needs. This is only a safety guard against a broken
+ * reply listing hundreds of files (which would burn the free quota). Override with BATON_MAX_FILES.
+ */
+export const maxTasks = (): number => {
+  const n = Number(process.env.BATON_MAX_FILES);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 25;
+};
 export const MIN_ACCEPTED_TASKS = 1;
 
 const PATH_KEYS = ["targetArtifact", "target_artifact", "artifact", "file", "filename", "fileName", "filePath", "file_path", "path", "target"];
@@ -55,8 +62,9 @@ export function buildPlannerMessages(ws: BatonWorkspace): ChatMessage[] {
           'a full, clear explanation (Markdown allowed) when asked to explain code or concepts. ' +
           'For follow-ups you can see the project files, so you can explain them.',
         "- Only if the user asks you to create, build, write, fix or change something, plan files as described below.",
-        `When planning, use the FEWEST files that do the job well: 1 to ${MAX_TASKS} (a simple page can be a single index.html ` +
-          "with inline CSS and JS). Each task produces exactly ONE artifact. Fewer files means fewer calls and less cost.",
+        "When planning, use the FEWEST files that do the job well, but EVERY file the product needs to actually work " +
+          "(a simple page can be a single index.html with inline CSS and JS; a full app with a backend also needs its frontend pages). " +
+          "Never leave out a part the user asked for. Each task produces exactly ONE artifact. Fewer files means fewer calls and less cost.",
         'For each task, list in "uses" the earlier files it must match (e.g. app.js uses index.html for element ids). ' +
           "Only those are sent to it in full, so keep the list short but complete.",
         TASK_TYPE_GUIDANCE[ws.taskType],
@@ -104,7 +112,7 @@ function plannerUserMessage(ws: BatonWorkspace): string {
     included.length ? `## Current contents\n${included.map((f) => `=== ${f} ===\n${ws.artifacts[f]}`).join("\n")}` : "",
     listed.length ? `## Outlines of the other files (full text omitted to save tokens)\n${listed.map((f) => `=== ${f} ===\n${outlineFile(f, ws.artifacts[f])}`).join("\n")}` : "",
     "## Rules for follow-ups\n" +
-      "- Plan ONLY the files that must change or be added for the new request (1 to 4).\n" +
+      "- Plan ONLY the files that must change or be added for the new request (as few as possible, but all that are needed).\n" +
       "- To change an existing file, use its exact existing path; it will be rewritten in full.\n" +
       "- Keep the project's existing language, framework and structure.",
   ]
@@ -130,6 +138,8 @@ export interface ParsedPlan {
   tasks: BatonTask[];
   /** Set when the message was a question: the reply, and no tasks. */
   answer?: string;
+  /** Files the planner listed beyond the safety guard (not built). */
+  dropped?: string[];
 }
 
 export function parsePlan(text: string): ParsedPlan {
@@ -152,6 +162,8 @@ export function parsePlan(text: string): ParsedPlan {
   if (!rawTasks) throw new Error("planner reply has no tasks array");
   const seen = new Set<string>();
   const tasks: BatonTask[] = [];
+  const dropped: string[] = [];
+  const limit = maxTasks();
   for (const raw of rawTasks) {
     if (!raw || typeof raw !== "object") continue;
     const t = raw as Record<string, unknown>;
@@ -161,6 +173,10 @@ export function parsePlan(text: string): ParsedPlan {
     const path = safe ? textOnlyPath(safe) : null;
     if (!path || seen.has(path)) continue;
     seen.add(path);
+    if (tasks.length >= limit) {
+      dropped.push(path);
+      continue;
+    }
     const title = firstString(t, TITLE_KEYS)?.trim() ?? `Write ${path}`;
     const usesRaw = [t.uses, t.dependsOn, t.depends_on, t.dependencies].find(Array.isArray) as unknown[] | undefined;
     const uses = usesRaw
@@ -168,12 +184,11 @@ export function parsePlan(text: string): ParsedPlan {
       .map((u) => safeArtifactPath(u))
       .filter((u): u is string => Boolean(u) && u !== path);
     tasks.push({ id: tasks.length + 1, title, targetArtifact: path, status: "pending", ...(uses?.length ? { uses } : {}) });
-    if (tasks.length === MAX_TASKS) break;
   }
   if (tasks.length < MIN_ACCEPTED_TASKS) {
     throw new Error("planner produced no usable tasks (each needs a file path)");
   }
-  return { metadata, tasks };
+  return { metadata, tasks, ...(dropped.length ? { dropped } : {}) };
 }
 
 /**
@@ -237,6 +252,9 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
         ws.tasks = plan.tasks;
         ws.emit?.({ type: "plan", tasks: plan.tasks.map((t) => ({ id: t.id, targetArtifact: t.targetArtifact, title: t.title })) });
         log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestone${plan.tasks.length === 1 ? "" : "s"}`, result.usage);
+        if (plan.dropped?.length) {
+          log(ws, 0, "plan", { provider: "baton", model: "guard" }, `plan listed ${plan.tasks.length + plan.dropped.length} files; safety guard (BATON_MAX_FILES=${maxTasks()}) skipped: ${plan.dropped.join(", ")}. Ask for them in a follow-up.`);
+        }
         return true;
       } catch (err) {
         if (isCancelled(err)) throw err; // Stop pressed

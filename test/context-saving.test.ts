@@ -67,7 +67,7 @@ test("nothing detected and no 'uses': full text up to the budget (newest first),
 
 test("planner is told to use the fewest files and to list what each file uses", () => {
   const sys = buildPlannerMessages(ws([]))[0].content;
-  assert.match(sys, /FEWEST files that do the job well: 1 to 4/);
+  assert.match(sys, /FEWEST files that do the job well, but EVERY file the product needs/);
   assert.match(sys, /a simple page can be a single index\.html/);
   assert.match(sys, /list in "uses" the earlier files it must match/);
 });

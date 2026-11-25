@@ -106,7 +106,7 @@ Before planning, the planner decides whether your message asks for **work** or i
 
 ## Cost savers
 
-* **Fewest files:** the planner uses 1–4 files, as few as the job needs (a simple page can be a single `index.html`).
+* **Fewest files:** the planner uses as few files as the job needs, but never drops a part you asked for (a simple page can be a single `index.html`; a full app gets its backend and frontend). There is no file cap, only a safety guard of 25 (`BATON_MAX_FILES`) against broken plans.
 * **Less context:** each file's plan entry lists which earlier files it `uses`. A build step gets those in full and every other file as a short **outline** (exports, functions, DOM ids, classes, CSS selectors, headings). Without a list, files go in full up to `BATON_CONTEXT_FULL_CHARS` (12k chars, newest first). Context views and exports mark outlined files.
 * **Edit, don't rewrite:** in follow-ups, files of at least `BATON_EDIT_MIN_CHARS` (1,500 chars) are changed with small SEARCH/REPLACE edit blocks instead of a full rewrite, so the model only writes what changes. If a block doesn't match, Baton asks the same model for the full file once; the unusable reply counts as "wasted" in the token breakdown. `BATON_EDIT_MODE=off` turns this off.
 
