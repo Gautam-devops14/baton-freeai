@@ -550,7 +550,8 @@ export const UI_HTML = /* html */ `<!doctype html>
     ["openai", "openaiApiKey", "OpenAI (paid)", "sk-...", "https://platform.openai.com/api-keys"],
   ];
   const keys = { nvidia: "", groq: "", gemini: "", openrouter: "", openai: "" };
-  let remember = store.get("baton.remember") === "1";
+  // On by default: keys survive server restarts and reloads. Only off if the user unticked it ("0").
+  let remember = store.get("baton.remember") !== "0";
   if (remember) for (const [k] of KEY_FIELDS) keys[k] = store.get("baton." + k) || "";
   const keyCount = () => KEY_FIELDS.filter(([k]) => keys[k].trim()).length;
   const keyPayload = () => Object.fromEntries(KEY_FIELDS.map(([k, field]) => [field, keys[k].trim() || undefined]));
@@ -574,7 +575,7 @@ export const UI_HTML = /* html */ `<!doctype html>
   function saveSettings() {
     for (const [k] of KEY_FIELDS) keys[k] = ($("key_" + k).value || "").trim();
     remember = $("remember").checked;
-    store.set("baton.remember", remember ? "1" : null);
+    store.set("baton.remember", remember ? "1" : "0");
     for (const [k] of KEY_FIELDS) store.set("baton." + k, remember && keys[k] ? keys[k] : null);
     $("settingsDlg").close();
     renderKeyStatus();
