@@ -52,9 +52,9 @@ test("full relay: Groq sprint, 429 failover to Gemini with full context, zip dow
   assert.equal(out.status, "success");
   assert.match(out.workspaceId, /^ws_\d+_[0-9a-f]{16}$/);
   assert.deepEqual(out.summary, {
-    totalTasks: 3,
-    completedTasks: 3,
-    artifactsGenerated: ["package.json", "src/models/User.js", "src/routes/auth.js"],
+    totalTasks: 4, // the harness contract adds server.js: Express models alone can't start
+    completedTasks: 4,
+    artifactsGenerated: ["package.json", "src/models/User.js", "src/routes/auth.js", "server.js"],
   });
   assert.equal(out.artifacts["package.json"], '{"name": "auth"}\n');
   assert.equal(out.artifacts["src/models/User.js"], "export const User = {};\n");
@@ -62,6 +62,7 @@ test("full relay: Groq sprint, 429 failover to Gemini with full context, zip dow
   const events = out.executionLogs.map((l: any) => `${l.step}:${l.event}:${l.provider}`);
   assert.deepEqual(events, [
     "0:plan:google",
+    "0:plan:baton", // harness contract: "added missing harness file so the project runs: server.js"
     "1:execute:groq",
     // Step 2: every Groq model is rate limited (gpt-oss, llama-3.3, llama-3.1), then Baton leaves Groq.
     "2:failover:groq",
@@ -71,7 +72,8 @@ test("full relay: Groq sprint, 429 failover to Gemini with full context, zip dow
     "2:execute:google",
     // Groq is cooling down after the 429s, so task 3 goes straight to Gemini.
     "3:execute:google",
-    "4:complete:baton",
+    "4:execute:google",
+    "5:complete:baton",
   ]);
   assert.ok(out.executionLogs.some((l: any) => /HTTP 429 rate limit detected; passing baton to Google AI Studio/.test(l.message)));
   assert.deepEqual(out.calls.filter((c: any) => c.step === 2 && c.provider === "groq").map((c: any) => c.model),
@@ -168,7 +170,7 @@ test("retired Gemini model: planner swaps to the lite model, relay skips the dea
   const first = out.executionLogs.slice(0, 2).map((l: any) => [l.event, l.model, l.message]);
   assert.deepEqual(first, [
     ["failover", "gemini-3.8-flash", "HTTP 404 model unavailable: This model is no longer available to new users; retrying with gemini-3.5-flash-lite"],
-    ["plan", "gemini-3.5-flash-lite", "Project decomposed into 3 milestones"],
+    ["plan", "gemini-3.5-flash-lite", "Project decomposed into 4 milestones"],
   ]);
   const geminiModelsCalled = calls.filter((c) => isGemini(c.url)).map((c) => c.model);
   assert.equal(geminiModelsCalled.filter((m) => m === "gemini-3.8-flash").length, 1, "dead model only tried once per run");
@@ -242,7 +244,7 @@ test("Gemini-only: overloaded first, recovers on the retry pass", async () => {
   assert.deepEqual(out.executionLogs.slice(0, 3).map((l: any) => l.message), [
     "HTTP 503 model overloaded; retrying with gemini-3.5-flash-lite",
     "HTTP 503 model overloaded; retrying with gemini-3.8-flash in 0.1s",
-    "Project decomposed into 3 milestones",
+    "Project decomposed into 4 milestones",
   ]);
   process.env.BATON_OVERLOAD_RETRY_MS = "0";
 });

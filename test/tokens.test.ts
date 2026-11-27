@@ -10,7 +10,7 @@ const isNvidia = (url: string) => url.includes("integrate.api.nvidia.com");
 const isPlanner = (body: any) => body.messages?.[0]?.content?.includes("Task Architect");
 const PLAN = JSON.stringify({ tasks: [
   { title: "Manifest", targetArtifact: "app.js" },
-  { title: "Server", targetArtifact: "server.js" },
+  { title: "Server", targetArtifact: "routes.js" },
 ] });
 
 function reply(content: string, usage?: object, status = 200) {

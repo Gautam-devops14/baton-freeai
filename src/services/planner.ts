@@ -50,6 +50,22 @@ const TASK_TYPE_GUIDANCE: Record<BatonWorkspace["taskType"], string> = {
     'Artifacts are analysis deliverables such as "data/sample.csv", "analysis.py", or "findings.md". Decide "primaryLanguage" and "methodology".',
 };
 
+/** Universal Runnable Harness Contract: every code project must start/open with no missing glue files. */
+export const HARNESS_CONTRACT = [
+  "UNIVERSAL RUNNABLE HARNESS CONTRACT. Before planning files, determine the project's ARCHETYPE (put it in decisions as \"archetype\") " +
+    "and include its mandatory harness files in the plan:",
+  "1. CLIENT_WEB (HTML, CSS, vanilla JS, Canvas): an index.html that mounts every CSS file (<link>) and every JS file (<script src>) " +
+    "with the exact planned paths, so it opens directly in a browser.",
+  "2. NODE_BACKEND (Express, Fastify, REST APIs): package.json with \"scripts\": {\"start\": \"node server.js\"} and every dependency; " +
+    "an entry bootstrap file (server.js or app.js) that calls app.listen(PORT); .env.example if database URIs or JWT secrets are used.",
+  "3. PYTHON_BACKEND_OR_SCRIPT (FastAPI, Flask, CLI, automation): requirements.txt listing every external package; a root entry point " +
+    "(main.py or app.py) with a runnable if __name__ == \"__main__\": block.",
+  "4. DATABASE_DATA (SQL, schemas, migrations): schema.sql (table definitions and constraints); seed.sql (sample mock data so queries " +
+    "can be tested immediately); a quick verification script (test_queries.sql or a lightweight JS/Python connection runner).",
+  "RULE: even if the user asks only for specific internal files (e.g. \"build me user and order models\"), plan the archetype's harness " +
+    "files too, so the generated codebase is a complete, runnable unit. Harness files count toward the plan; never skip them to save files.",
+].join("\n");
+
 export function buildPlannerMessages(ws: BatonWorkspace): ChatMessage[] {
   return [
     {
@@ -69,6 +85,7 @@ export function buildPlannerMessages(ws: BatonWorkspace): ChatMessage[] {
         'For each task, list in "uses" the earlier files it must match (e.g. app.js uses index.html for element ids). ' +
           "Only those are sent to it in full, so keep the list short but complete.",
         TASK_TYPE_GUIDANCE[ws.taskType],
+        ...(ws.taskType === "code" ? [HARNESS_CONTRACT] : []),
         "Every artifact must be a plain-text file (source code, HTML, CSS, JSON, Markdown, CSV, SVG...). " +
           "Never plan binary files such as .png, .jpg, .gif, .ico, .pdf, .zip or fonts: a text model cannot produce them. " +
           "Draw logos, icons and illustrations as SVG (a .svg file or inline <svg> in HTML).",
@@ -192,6 +209,80 @@ export function parsePlan(text: string): ParsedPlan {
   return { metadata, tasks, ...(dropped.length ? { dropped } : {}) };
 }
 
+const ext = (p: string) => (/\.([a-z0-9]+)$/i.exec(p)?.[1] ?? "").toLowerCase();
+const FRONT_DIR = /^(public|static|client|frontend|www|web)\//i;
+const PY_LIBS = /\b(flask|fastapi|django|streamlit|pandas|numpy|requests|sqlalchemy|matplotlib|uvicorn|scikit|sklearn|selenium|beautifulsoup|bs4|pydantic|openai)\b/i;
+const SECRET_HINT = /\b(jwt|mongo(db)?|postgres(ql)?|mysql|database url|db uri|redis|secret|api key|oauth|supabase|firebase)\b/i;
+const NODE_HINT = /\b(express|fastify|koa|hapi|node\.?js|nest\.?js|socket\.io|sqlite3|mongoose|prisma)\b/i;
+
+/**
+ * Enforce the harness contract in code too (models forget): add the glue file a project can't run without.
+ * Only adds files that are missing from both the plan and the existing project. Returns what was added.
+ */
+export function ensureHarness(ws: Pick<BatonWorkspace, "tasks" | "artifacts" | "metadata">): string[] {
+  const have = new Set([...ws.tasks.map((t) => t.targetArtifact), ...Object.keys(ws.artifacts ?? {})]);
+  const all = [...have];
+  const decisions = Object.values(ws.metadata ?? {}).join(" ");
+  const added: string[] = [];
+  const insert = (task: { title: string; targetArtifact: string; uses?: string[] }, at: number) => {
+    const t: BatonTask = { id: 0, title: task.title, targetArtifact: task.targetArtifact, status: "pending", ...(task.uses?.length ? { uses: task.uses } : {}) };
+    ws.tasks.splice(Math.max(0, Math.min(at, ws.tasks.length)), 0, t);
+    have.add(task.targetArtifact);
+    added.push(task.targetArtifact);
+  };
+
+
+  const jsFiles = all.filter((p) => ["js", "mjs", "cjs", "ts"].includes(ext(p)) && !FRONT_DIR.test(p));
+  const pyFiles = all.filter((p) => ext(p) === "py");
+  const sqlFiles = all.filter((p) => ext(p) === "sql");
+
+  // NODE_BACKEND: package.json (start script) + an entry that listens + .env.example for secrets.
+  const nodeBackend = jsFiles.length > 0 && (NODE_HINT.test(decisions) || jsFiles.some((p) => /(^|\/)server\./i.test(p)));
+  if (nodeBackend) {
+    if (!have.has("package.json")) insert({ title: 'package.json with every dependency and "scripts": {"start": "node server.js"}', targetArtifact: "package.json" }, 0);
+    const entry = jsFiles.find((p) => /^(src\/)?(server|app|index|main)\.(m?js|cjs|ts)$/i.test(p));
+    if (!entry) {
+      const deps = jsFiles.filter((p) => have.has(p) && !/\.(test|spec)\./.test(p));
+      insert({ title: "server.js: entry bootstrap that wires everything and calls app.listen(PORT)", targetArtifact: "server.js", uses: deps.slice(0, 6) }, ws.tasks.length);
+    }
+    if (SECRET_HINT.test(decisions) && !have.has(".env.example") && !have.has(".env")) {
+      insert({ title: ".env.example with every environment variable (database URI, JWT secret, PORT)", targetArtifact: ".env.example" }, ws.tasks.length);
+    }
+  }
+
+  // PYTHON_BACKEND_OR_SCRIPT: requirements.txt + a root entry with a __main__ block.
+  if (pyFiles.length) {
+    if (PY_LIBS.test(decisions) && !have.has("requirements.txt") && !have.has("pyproject.toml")) {
+      insert({ title: "requirements.txt listing every external package", targetArtifact: "requirements.txt" }, 0);
+    }
+    if (!pyFiles.some((p) => /^(main|app|manage)\.py$/i.test(p))) {
+      insert({ title: 'main.py: root entry point with an if __name__ == "__main__": block that runs the project', targetArtifact: "main.py", uses: pyFiles.slice(0, 6) }, ws.tasks.length);
+    }
+  }
+
+  // DATABASE_DATA: schema, seed data and a quick verification script.
+  if (sqlFiles.length || /\bDATABASE_DATA\b/.test(decisions)) {
+    if (!have.has("schema.sql")) insert({ title: "schema.sql: table definitions and constraints", targetArtifact: "schema.sql" }, 0);
+    if (!have.has("seed.sql")) insert({ title: "seed.sql: sample mock data so queries can be tested immediately", targetArtifact: "seed.sql", uses: ["schema.sql"] }, ws.tasks.findIndex((t) => t.targetArtifact === "schema.sql") + 1);
+    const verify = [...have].some((p) => /test_queries\.sql$|(^|\/)(verify|check|test)[-_]?(db|queries)?\.(js|py)$/i.test(p));
+    if (!verify) insert({ title: "test_queries.sql: quick queries that verify the schema and seed data", targetArtifact: "test_queries.sql", uses: ["schema.sql", "seed.sql"] }, ws.tasks.length);
+  }
+
+  // CLIENT_WEB: styles or browser scripts but no page to open.
+  const front = all.filter((p) => ext(p) === "css" || (FRONT_DIR.test(p) && ["js", "mjs", "ts"].includes(ext(p))));
+  if (front.length && !all.some((p) => ["html", "htm"].includes(ext(p)))) {
+    const dir = FRONT_DIR.exec(front[0])?.[0] ?? "";
+    const page = `${dir}index.html`;
+    const css = front.filter((p) => ext(p) === "css");
+    const firstScript = ws.tasks.findIndex((t) => front.includes(t.targetArtifact) && ext(t.targetArtifact) !== "css");
+    insert({ title: `${page}: the page that links ${front.join(", ")}`, targetArtifact: page, uses: css }, firstScript < 0 ? ws.tasks.length : firstScript);
+    for (const t of ws.tasks) if (front.includes(t.targetArtifact) && ext(t.targetArtifact) !== "css") t.uses = [...new Set([...(t.uses ?? []), page])];
+  }
+
+  ws.tasks.forEach((t, i) => (t.id = i + 1));
+  return added;
+}
+
 /**
  * Plan the workspace. `targets` is tried in order — Gemini is the designated
  * architect; any further targets are a safety net so a single rate limit
@@ -251,8 +342,12 @@ export async function planWorkspace(ws: BatonWorkspace, allTargets: ProviderTarg
         }
         ws.metadata = { ...ws.metadata, ...plan.metadata };
         ws.tasks = plan.tasks;
+        const harness = ws.taskType === "code" ? ensureHarness(ws) : [];
         ws.emit?.({ type: "plan", tasks: plan.tasks.map((t) => ({ id: t.id, targetArtifact: t.targetArtifact, title: t.title })) });
         log(ws, 0, "plan", { ...target, model: result.model }, `Project decomposed into ${plan.tasks.length} milestone${plan.tasks.length === 1 ? "" : "s"}`, result.usage);
+        if (harness.length) {
+          log(ws, 0, "plan", { provider: "baton", model: "harness" }, `added missing harness file${harness.length === 1 ? "" : "s"} so the project runs: ${harness.join(", ")}`);
+        }
         if (plan.dropped?.length) {
           log(ws, 0, "plan", { provider: "baton", model: "guard" }, `plan listed ${plan.tasks.length + plan.dropped.length} files; safety guard (BATON_MAX_FILES=${maxTasks()}) skipped: ${plan.dropped.join(", ")}. Ask for them in a follow-up.`);
         }

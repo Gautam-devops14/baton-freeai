@@ -1129,6 +1129,7 @@ export const UI_HTML = /* html */ `<!doctype html>
           else if (l.event === "plan" && m.indexOf("Answered") === 0) add("✓", "ok", "It's a question: answering directly");
           else if (l.event === "stop") add("■", "wait", m);
           else if (l.event === "plan" && m.indexOf("Resuming") === 0) add("↻", "ok", m);
+          else if (l.event === "plan" && m.indexOf("added missing harness") === 0) add("+", "ok", "Added " + m.split(": ").slice(1).join(": ") + " so the project runs");
           else if (l.event === "plan" && m.indexOf("greeting removed") === 0) add("·", "dim", "Greeting removed before planning (saves tokens)");
           else if (l.event === "failover" && m.indexOf("time limit") >= 0) add("⏱", "bad", m.charAt(0).toUpperCase() + m.slice(1));
           else if (l.event === "failover" && m.indexOf("skipped:") === 0) add("↷", "dim", "Skipped " + (PROVIDER_LABEL[l.provider] || l.provider) + ": " + m.split(": ").slice(2).join(": "));
